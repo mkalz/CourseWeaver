@@ -2,6 +2,12 @@
 
 Convert an unpacked Moodle course backup into **clean Markdown for GitHub** and **AFFiNE-ready imports**.
 
+1. Download a Moodle course as archive (.mbz)
+2. Rename the file from .mbz to .zip.
+3. Unpack the zip file.
+4. Rename the folder to a shorter name.
+5. Covert to markdown and import the resulting zip-file as Snapshot into Affine.
+
 > The CLI entry point remains `moodle2md.py` for backward compatibility.
 
 ## ✨ Features
