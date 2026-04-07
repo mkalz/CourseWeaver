@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# local export folders
+course/
+*_markdown/
+*_singlepage/
+*_markdown_ui/
+
+# generated zip packages
+*_affine.zip
+*_affine_native.zip
+
+# generated native snapshot files
+AFFINE_NATIVE.snapshot.json
+
