@@ -90,21 +90,6 @@ start_webui.command macOS launcher
 requirements.txt    Python dependencies
 ```
 
-## 🐙 GitHub publication
-
-Recommended repository name:
-
-```text
-Moodle2AffineMD
-```
-
-Recommended publish flow:
-
-1. Push the converter code in this repository
-2. Keep generated exports out of version control unless you explicitly want demo output
-3. Use the generated Markdown output as GitHub-ready course material
-4. Use `*_affine.zip` or `*_affine_native.zip` for AFFiNE import
-
 ## � Upstream origin and attribution
 
 This repository is a modernization and extension of the original project:
