@@ -19,8 +19,10 @@ import io
 import platform
 import subprocess
 import sys
+import wave
 from html import unescape, escape
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
@@ -115,9 +117,26 @@ RUNTIME_OPTIONS = {
     "pdf_text_max_chars": 20000,
     "pdf_text_ocr_fallback": False,
     "pdf_text_ocr_lang": "eng",
+    "pdf_text_audio": False,
+    "pdf_text_audio_min_chars": 300,
+    "tts_provider": "none",
+    "gemini_tts_model": "gemini-2.5-flash-preview-tts",
+    "gemini_tts_voice": "Kore",
+    "gemini_tts_base_url": "https://generativelanguage.googleapis.com/v1beta",
+    "gemini_tts_min_interval_seconds": 5.0,
+    "elevenlabs_model_id": "eleven_multilingual_v2",
+    "elevenlabs_voice_id": "",
+    "ai_jobs_resume_done": False,
 }
 
 PDF_TEXT_CACHE = {}
+LAST_GEMINI_TTS_REQUEST_TS = 0.0
+ADAPTIVE_RATE_STATE = {
+    "gemini_tts_interval": None,
+    "gemini_tts_max_interval": 0.0,
+    "gemini_tts_429_count": 0,
+}
+AI_JOB_STATUS_CACHE = {}
 
 
 def runtime_option(key, default=None):
@@ -127,6 +146,53 @@ def runtime_option(key, default=None):
 def configure_runtime_options(**kwargs):
     for key, value in kwargs.items():
         RUNTIME_OPTIONS[key] = value
+
+
+def reset_adaptive_rate_state():
+    ADAPTIVE_RATE_STATE["gemini_tts_interval"] = None
+    ADAPTIVE_RATE_STATE["gemini_tts_max_interval"] = 0.0
+    ADAPTIVE_RATE_STATE["gemini_tts_429_count"] = 0
+
+
+def reset_ai_job_status_cache():
+    AI_JOB_STATUS_CACHE.clear()
+
+
+def base_gemini_tts_interval_seconds():
+    return max(0.0, float(runtime_option("gemini_tts_min_interval_seconds", 5.0) or 0.0))
+
+
+def current_gemini_tts_interval_seconds():
+    base_interval = base_gemini_tts_interval_seconds()
+    adaptive_interval = ADAPTIVE_RATE_STATE.get("gemini_tts_interval")
+    if adaptive_interval is None:
+        return base_interval
+    return max(base_interval, float(adaptive_interval))
+
+
+def on_gemini_tts_retry(exc, _attempt, _max_attempts):
+    if not isinstance(exc, HTTPError) or int(exc.code) != 429:
+        return None
+    ADAPTIVE_RATE_STATE["gemini_tts_429_count"] = int(ADAPTIVE_RATE_STATE.get("gemini_tts_429_count") or 0) + 1
+    base_interval = base_gemini_tts_interval_seconds()
+    current_interval = current_gemini_tts_interval_seconds()
+    increased_interval = min(60.0, max(base_interval, current_interval * 2.2 if current_interval > 0 else base_interval))
+    ADAPTIVE_RATE_STATE["gemini_tts_interval"] = increased_interval
+    ADAPTIVE_RATE_STATE["gemini_tts_max_interval"] = max(float(ADAPTIVE_RATE_STATE.get("gemini_tts_max_interval") or 0.0), increased_interval)
+    print(f"[throttle] Gemini TTS interval increased to {increased_interval:.1f}s due to 429")
+    return increased_interval
+
+
+def on_gemini_tts_success():
+    current_interval = ADAPTIVE_RATE_STATE.get("gemini_tts_interval")
+    if current_interval is None:
+        return
+    base_interval = base_gemini_tts_interval_seconds()
+    lowered_interval = max(base_interval, float(current_interval) * 0.95)
+    if lowered_interval <= base_interval + 0.1:
+        ADAPTIVE_RATE_STATE["gemini_tts_interval"] = None
+    else:
+        ADAPTIVE_RATE_STATE["gemini_tts_interval"] = lowered_interval
 
 
 def resolve_local_output_path(output_dir, target):
@@ -145,6 +211,125 @@ def resolve_local_output_path(output_dir, target):
     if candidate.exists() and candidate.is_file():
         return candidate
     return None
+
+
+def ensure_unique_file_destination(directory, filename, discriminator=""):
+    directory_path = Path(directory)
+    base_name = Path(str(filename or "file")).name or "file"
+    stem = Path(base_name).stem or "file"
+    suffix = Path(base_name).suffix
+
+    candidate = directory_path / base_name
+    if not candidate.exists():
+        return candidate
+
+    token = re.sub(r"[^a-z0-9]+", "", str(discriminator or "").lower())[:8]
+    if token:
+        token_candidate = directory_path / f"{stem}_{token}{suffix}"
+        if not token_candidate.exists():
+            return token_candidate
+
+    counter = 2
+    while True:
+        numbered = directory_path / f"{stem}_{counter}{suffix}"
+        if not numbered.exists():
+            return numbered
+        counter += 1
+
+
+def ensure_ai_jobs_paths(output_dir):
+    jobs_root = Path(output_dir) / "files" / "ai_jobs"
+    input_dir = jobs_root / "input"
+    output_dir_path = jobs_root / "output"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    return jobs_root, input_dir, output_dir_path
+
+
+def write_ai_job_markdown(output_dir, folder_name, file_stem, text, title="AI Job"):
+    if not output_dir:
+        return ""
+    _, input_dir, output_dir_path = ensure_ai_jobs_paths(output_dir)
+    target_dir = input_dir if str(folder_name).strip().lower() == "input" else output_dir_path
+    safe_stem = re.sub(r"[^a-z0-9_-]+", "-", str(file_stem or "job").lower()).strip("-") or "job"
+    content_hash = hashlib.sha1(str(text or "").encode("utf-8")).hexdigest()[:10]
+    target_file = target_dir / f"{safe_stem}_{content_hash}.md"
+    body = (text or "").strip()
+    target_file.write_text(f"# {title}\n\n{body}\n", encoding="utf-8")
+    rel = target_file.resolve().relative_to(Path(output_dir).resolve()).as_posix()
+    return ensure_explicit_relative_path(encode_relative_path(rel))
+
+
+def append_ai_job_manifest(output_dir, record):
+    if not output_dir:
+        return
+    jobs_root, _, _ = ensure_ai_jobs_paths(output_dir)
+    manifest_path = jobs_root / "manifest.jsonl"
+    payload = dict(record or {})
+    payload.setdefault("timestamp", int(time.time()))
+    with manifest_path.open("a", encoding="utf-8") as manifest_file:
+        manifest_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    remember_ai_job_record(output_dir, payload)
+
+
+def load_ai_job_latest_records(output_dir, force_refresh=False):
+    if not output_dir:
+        return {}
+    root = str(Path(output_dir).resolve())
+    if not force_refresh and root in AI_JOB_STATUS_CACHE:
+        return AI_JOB_STATUS_CACHE[root]
+
+    jobs_root = Path(output_dir) / "files" / "ai_jobs"
+    manifest_path = jobs_root / "manifest.jsonl"
+    records = {}
+    if manifest_path.exists() and manifest_path.is_file():
+        try:
+            with manifest_path.open("r", encoding="utf-8") as manifest_file:
+                for line in manifest_file:
+                    raw = (line or "").strip()
+                    if not raw:
+                        continue
+                    try:
+                        record = json.loads(raw)
+                    except Exception:
+                        continue
+                    job_id = str(record.get("job_id") or "").strip()
+                    if not job_id:
+                        continue
+                    records[job_id] = record
+        except Exception:
+            records = {}
+
+    AI_JOB_STATUS_CACHE[root] = records
+    return records
+
+
+def remember_ai_job_record(output_dir, record):
+    if not output_dir:
+        return
+    root = str(Path(output_dir).resolve())
+    cache = AI_JOB_STATUS_CACHE.get(root)
+    if cache is None:
+        cache = load_ai_job_latest_records(output_dir)
+    job_id = str((record or {}).get("job_id") or "").strip()
+    if job_id:
+        cache[job_id] = dict(record or {})
+        AI_JOB_STATUS_CACHE[root] = cache
+
+
+def latest_ai_job_record(output_dir, job_id):
+    if not output_dir or not job_id:
+        return None
+    records = load_ai_job_latest_records(output_dir)
+    return records.get(str(job_id).strip())
+
+
+def is_ai_job_done(output_dir, job_id):
+    record = latest_ai_job_record(output_dir, job_id)
+    if not record:
+        return False
+    status = str(record.get("status") or "").strip().lower()
+    return status in {"done", "reused"}
 
 
 def clean_pdf_text(text):
@@ -328,6 +513,154 @@ def create_pdf_text_markdown(pdf_path, title, output_dir, extraction_result):
     return ensure_explicit_relative_path(encode_relative_path(note_path.resolve().relative_to(output_root).as_posix()))
 
 
+def create_audio_file_from_text(text, output_dir, file_stem):
+    if not output_dir:
+        return None
+    source_text = (text or "").strip()
+    safe_stem = re.sub(r"[^a-z0-9_-]+", "-", (file_stem or "audio").lower()).strip("-") or "audio"
+    pdf_audio_job_id = f"pdf_text_audio:{safe_stem}"
+    resume_done_jobs = bool(runtime_option("ai_jobs_resume_done", False))
+    if resume_done_jobs and is_ai_job_done(output_dir, pdf_audio_job_id):
+        previous = latest_ai_job_record(output_dir, pdf_audio_job_id) or {}
+        previous_audio_rel = str(previous.get("audio_relative_path") or "").strip()
+        if previous_audio_rel:
+            resolved_existing = resolve_local_output_path(output_dir, previous_audio_rel)
+            if resolved_existing is not None:
+                append_ai_job_manifest(output_dir, {
+                    "job_type": "pdf_text_audio",
+                    "job_id": pdf_audio_job_id,
+                    "status": "skipped",
+                    "reason": "already done (manifest resume)",
+                    "audio_relative_path": previous_audio_rel,
+                })
+                return previous_audio_rel
+
+    input_markdown = write_ai_job_markdown(
+        output_dir,
+        "input",
+        f"pdf_text_{safe_stem}",
+        source_text,
+        title=f"PDF Text Audio Input: {safe_stem}",
+    )
+
+    min_chars = int(runtime_option("pdf_text_audio_min_chars", 300) or 300)
+    if len(source_text) < min_chars:
+        print(f"[pdf_audio] skipped: {len(source_text)} chars < min {min_chars} ({file_stem})")
+        append_ai_job_manifest(output_dir, {
+            "job_type": "pdf_text_audio",
+            "job_id": pdf_audio_job_id,
+            "status": "skipped",
+            "reason": f"text shorter than min chars ({len(source_text)} < {min_chars})",
+            "input_markdown": input_markdown,
+        })
+        return None
+
+    provider = str(runtime_option("tts_provider", "none") or "none").strip().lower()
+    if provider not in {"gemini", "elevenlabs"}:
+        append_ai_job_manifest(output_dir, {
+            "job_type": "pdf_text_audio",
+            "job_id": pdf_audio_job_id,
+            "status": "skipped",
+            "reason": f"unsupported provider: {provider}",
+            "input_markdown": input_markdown,
+        })
+        return None
+
+    audio_dir = Path(output_dir) / "files" / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    append_ai_job_manifest(output_dir, {
+        "job_type": "pdf_text_audio",
+        "job_id": pdf_audio_job_id,
+        "status": "queued",
+        "provider": provider,
+        "input_markdown": input_markdown,
+    })
+
+    if provider == "gemini":
+        gemini_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+        if not gemini_key:
+            print("[pdf_audio] Gemini key missing; skipping PDF audio generation")
+            append_ai_job_manifest(output_dir, {
+                "job_type": "pdf_text_audio",
+                "job_id": pdf_audio_job_id,
+                "status": "error",
+                "provider": provider,
+                "error": "Gemini key missing",
+                "input_markdown": input_markdown,
+            })
+            return None
+        audio_bytes, mime_type = call_with_retries(
+            lambda: request_gemini_tts(
+                source_text,
+                api_key=gemini_key,
+                model=str(runtime_option("gemini_tts_model", "gemini-2.5-flash-preview-tts") or "gemini-2.5-flash-preview-tts"),
+                voice_name=str(runtime_option("gemini_tts_voice", "Kore") or "Kore"),
+                base_url=str(runtime_option("gemini_tts_base_url", "https://generativelanguage.googleapis.com/v1beta") or "https://generativelanguage.googleapis.com/v1beta"),
+            ),
+            label=f"pdf text tts {safe_stem}",
+            max_attempts=5,
+            base_delay_seconds=2.0,
+            on_retry=on_gemini_tts_retry,
+            on_success=on_gemini_tts_success,
+        )
+        ext = ".wav"
+        mime_lower = (mime_type or "").lower()
+        if "mpeg" in mime_lower:
+            ext = ".mp3"
+        elif "ogg" in mime_lower:
+            ext = ".ogg"
+        elif "aac" in mime_lower:
+            ext = ".aac"
+    else:
+        elevenlabs_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
+        voice_id = str(runtime_option("elevenlabs_voice_id", "") or "").strip() or (os.environ.get("ELEVENLABS_VOICE_ID") or "").strip()
+        if not elevenlabs_key or not voice_id:
+            print("[pdf_audio] ElevenLabs key/voice missing; skipping PDF audio generation")
+            append_ai_job_manifest(output_dir, {
+                "job_type": "pdf_text_audio",
+                "job_id": pdf_audio_job_id,
+                "status": "error",
+                "provider": provider,
+                "error": "ElevenLabs key/voice missing",
+                "input_markdown": input_markdown,
+            })
+            return None
+        audio_bytes = call_with_retries(
+            lambda: request_elevenlabs_tts(
+                source_text,
+                api_key=elevenlabs_key,
+                voice_id=voice_id,
+                model_id=str(runtime_option("elevenlabs_model_id", "eleven_multilingual_v2") or "eleven_multilingual_v2"),
+            ),
+            label=f"pdf text tts {safe_stem}",
+            max_attempts=3,
+            base_delay_seconds=1.5,
+        )
+        ext = ".mp3"
+
+    audio_name = f"{safe_stem}{ext}"
+    audio_path = audio_dir / audio_name
+    audio_path.write_bytes(audio_bytes)
+    rel = ensure_explicit_relative_path(encode_relative_path(f"files/audio/{audio_name}"))
+    output_markdown = write_ai_job_markdown(
+        output_dir,
+        "output",
+        f"pdf_text_audio_{safe_stem}",
+        f"Provider: {provider}\nAudio: {rel}",
+        title=f"PDF Text Audio Output: {safe_stem}",
+    )
+    append_ai_job_manifest(output_dir, {
+        "job_type": "pdf_text_audio",
+        "job_id": pdf_audio_job_id,
+        "status": "done",
+        "provider": provider,
+        "input_markdown": input_markdown,
+        "output_markdown": output_markdown,
+        "audio_relative_path": rel,
+    })
+    return rel
+
+
 STRUCTURED_WEEK_SECTIONS = (
     ("lernziele", "Learning Goals"),
     ("inhalte", "Content"),
@@ -500,7 +833,8 @@ def build_affine_embed_block(title, target, kind="link", output_dir=None, headin
             return f'\n{"#" * max(1, heading_level)} {title}\n\n<iframe src="{embed_url}"></iframe>\n\n[Open on YouTube]({target})\n'
         return f"\n{'#' * max(1, heading_level)} {title}\n\n[Open link]({target})\n"
     if kind in {"pdf", "file"}:
-        text_doc_target = None
+        inline_pdf_text = None
+        inline_pdf_audio_target = None
         if kind == "pdf" and runtime_option("pdf_text_blocks", False):
             try:
                 pdf_path = resolve_local_output_path(output_dir, target)
@@ -514,18 +848,37 @@ def build_affine_embed_block(title, target, kind="link", output_dir=None, headin
                         ocr_fallback=bool(runtime_option("pdf_text_ocr_fallback", False)),
                         ocr_lang=str(runtime_option("pdf_text_ocr_lang", "eng") or "eng"),
                     )
-                    text_doc_target = create_pdf_text_markdown(pdf_path, title, output_dir, extraction)
                     engine_used = extraction.get("engine") or "none"
                     ok_str = "ok" if extraction.get("ok") else "no text"
-                    print(f"[pdf_text] → {ok_str} (engine: {engine_used}) → {text_doc_target}")
+                    print(f"[pdf_text] → {ok_str} (engine: {engine_used})")
+                    if extraction.get("ok") and extraction.get("text"):
+                        inline_pdf_text = extraction["text"].strip()
+                        if runtime_option("pdf_text_audio", False):
+                            try:
+                                target_hash = hashlib.sha1(str(target or pdf_path.name).encode("utf-8")).hexdigest()[:8]
+                                inline_pdf_audio_target = create_audio_file_from_text(
+                                    inline_pdf_text,
+                                    output_dir,
+                                    file_stem=f"pdf_{slugify_heading(title or pdf_path.stem)}_{target_hash}_text",
+                                )
+                                if inline_pdf_audio_target:
+                                    print(f"[pdf_audio] generated → {inline_pdf_audio_target}")
+                            except Exception as exc:
+                                print(f"[pdf_audio] Error generating audio for '{title}': {exc}")
                 else:
                     print(f"[pdf_text] Skipped '{target}': file not found in output directory")
             except Exception as exc:
                 print(f"[pdf_text] Error extracting text from PDF '{title}': {exc}")
         attachment_marker = build_affine_attachment_marker(title, target, output_dir, heading_level=heading_level)
         if attachment_marker:
-            if text_doc_target:
-                attachment_marker += f"\n* [Readable text extract]({text_doc_target})\n"
+            if inline_pdf_text:
+                quoted_lines = "\n".join(
+                    f"> {line}" if line.strip() else ">"
+                    for line in inline_pdf_text.splitlines()
+                )
+                attachment_marker += f"\n> **Extracted Text**\n>\n{quoted_lines}\n"
+            if inline_pdf_audio_target:
+                attachment_marker += f"\n* [Listen to extracted PDF text]({inline_pdf_audio_target})\n"
             return attachment_marker
         if target:
             safe_target = ensure_explicit_relative_path(target)
@@ -552,11 +905,14 @@ def download_external_file(url, title, output_dir):
     if not filename:
         filename = getNombreFichero(title).replace(".md", ".pdf")
 
-    destination = os.path.join(output_dir, "files", filename)
-    if os.path.exists(destination):
-        if os.path.getsize(destination) > 0:
-            return encode_relative_path("files/" + filename)
-        os.remove(destination)
+    destination_dir = Path(output_dir) / "files"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    url_hash = hashlib.sha1(str(url or "").encode("utf-8")).hexdigest()[:8]
+    destination = ensure_unique_file_destination(destination_dir, filename, discriminator=url_hash)
+    if destination.exists():
+        if destination.stat().st_size > 0:
+            return encode_relative_path("files/" + destination.name)
+        destination.unlink()
 
     request = Request(url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/124 Safari/537.36"})
     with urlopen(request, timeout=30) as response:
@@ -568,33 +924,33 @@ def download_external_file(url, title, output_dir):
     with open(destination, "wb") as out_file:
         out_file.write(payload)
 
-    if os.path.getsize(destination) == 0:
-        os.remove(destination)
+    if destination.stat().st_size == 0:
+        destination.unlink()
         raise ValueError("Downloaded file is empty")
 
-    return encode_relative_path("files/" + filename)
+    return encode_relative_path("files/" + destination.name)
 
 
-def create_external_link_note(url, title, output_dir, error_message=""):
-    note_name = getNombreFichero(f"{title}_external_link")
-    note_dir = os.path.join(output_dir, "doc")
-    crear_fichero(note_name, note_dir + os.sep)
-    escribir(note_dir + os.sep, note_name, f"# {title}")
-    escribir(note_dir + os.sep, note_name)
-    escribir(note_dir + os.sep, note_name, "> ⚠️ This linked file could not be mirrored locally during export.")
-    escribir(note_dir + os.sep, note_name)
-    escribir(note_dir + os.sep, note_name, "## What happened")
-    escribir(note_dir + os.sep, note_name, "The original Moodle item points to an external downloadable resource that is currently blocked, expired, or no longer available.")
-    if error_message:
-        escribir(note_dir + os.sep, note_name)
-        escribir(note_dir + os.sep, note_name, f"**Reason:** `{error_message}`")
-    escribir(note_dir + os.sep, note_name)
-    escribir(note_dir + os.sep, note_name, "## Original source")
-    escribir(note_dir + os.sep, note_name, f"- {url}")
-    escribir(note_dir + os.sep, note_name)
-    escribir(note_dir + os.sep, note_name, "## Recommendation")
-    escribir(note_dir + os.sep, note_name, "If you still need this file in Affine or GitHub, download it manually and place it into the `files/` folder.")
-    return encode_relative_path("doc/" + note_name)
+def build_external_source_inline_link(url, label, error_message=""):
+    clean_label = (label or url or "External source").strip()
+    clean_url = (url or "").strip()
+    if not clean_url:
+        return clean_label
+    reason = (error_message or "").strip()
+    if reason:
+        return f"[{clean_label}]({clean_url}) _(external source not mirrored: {reason})_"
+    return f"[{clean_label}]({clean_url}) _(external source not mirrored)_"
+
+
+def build_external_source_warning_block(title, url, heading_level=3, error_message=""):
+    heading = "#" * max(1, heading_level)
+    display_title = (title or "External source").strip() or "External source"
+    link_line = f"[Open source]({url})" if url else "Open source link unavailable"
+    reason = (error_message or "").strip()
+    warning = "External file could not be mirrored into files/."
+    if reason:
+        warning = f"{warning} Reason: {reason}"
+    return f"\n{heading} {display_title}\n\n> {warning}\n\n{link_line}\n"
 
 
 def normalizar_html(texto, media_prefix="img/", output_dir=None, relative_prefix=""):
@@ -619,9 +975,7 @@ def normalizar_html(texto, media_prefix="img/", output_dir=None, relative_prefix
                 url = f"{relative_prefix}{local_target}" if relative_prefix else local_target
                 pre_encoded = True
             except Exception as exc:
-                note_target = create_external_link_note(raw_url, label, output_dir, str(exc))
-                url = f"{relative_prefix}{note_target}" if relative_prefix else note_target
-                pre_encoded = True
+                return build_external_source_inline_link(raw_url, label, str(exc))
 
         if not pre_encoded:
             url = encode_relative_path(url)
@@ -656,9 +1010,7 @@ def normalizar_html(texto, media_prefix="img/", output_dir=None, relative_prefix
                     return f'![]({rendered_target})'
                 return f'[{title}]({ensure_explicit_relative_path(rendered_target)})'
             except Exception as exc:
-                note_target = create_external_link_note(raw_url, title, output_dir, str(exc))
-                rendered_target = f"{relative_prefix}{note_target}" if relative_prefix else note_target
-                return f'[External file]({rendered_target})'
+                return build_external_source_inline_link(raw_url, title, str(exc))
 
         return raw_url
 
@@ -996,9 +1348,8 @@ def create_affine_zip(output_dir, archive_path=None, include_doc_pages=False, in
                 archive.write(item, item.relative_to(output_path))
 
         doc_dir = output_path / "doc"
-        if doc_dir.exists():
-            pattern = "*.md" if include_doc_pages else "*external_link*.md"
-            for item in sorted(doc_dir.glob(pattern)):
+        if doc_dir.exists() and include_doc_pages:
+            for item in sorted(doc_dir.glob("*.md")):
                 archive.write(item, item.relative_to(output_path))
             if include_pdf_text_pages:
                 for item in sorted((doc_dir / "pdf_text").glob("*.md")):
@@ -1268,6 +1619,753 @@ def merge_week_markdown_into_main(main_markdown_text, output_dir, week_pages_man
             continue
         merged_parts.append(week_markdown)
     return "\n\n---\n\n".join(part for part in merged_parts if part).strip() or main_markdown_text
+
+
+def markdown_to_plain_text_for_summary(markdown_text):
+    text = "" if markdown_text is None else str(markdown_text)
+    if not text:
+        return ""
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)
+    text = re.sub(r"\[\^([^\]]+)\]", "", text)
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s{0,3}>\s?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{2,}", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
+def remove_generated_ai_section(markdown_text):
+    text = "" if markdown_text is None else str(markdown_text)
+    return re.sub(
+        r"\n?<!-- AI_WEEK_SUMMARY_START -->.*?<!-- AI_WEEK_SUMMARY_END -->\n?",
+        "\n",
+        text,
+        flags=re.DOTALL,
+    ).strip()
+
+
+def build_openai_chat_url(base_url):
+    base = (base_url or "https://api.openai.com/v1").strip().rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
+def build_gemini_generate_url(base_url, model, api_key):
+    base = (base_url or "https://generativelanguage.googleapis.com/v1beta").strip().rstrip("/")
+    model_name = (model or "gemini-1.5-flash").strip()
+    if "/models/" in model_name:
+        model_name = model_name.split("/models/", 1)[1]
+    if model_name.startswith("models/"):
+        model_name = model_name.split("models/", 1)[1]
+    return f"{base}/models/{quote(model_name, safe='._-')}:generateContent?key={quote(api_key, safe='')}"
+
+
+def request_openai_week_summary(source_text, api_key, model, language="de", max_output_tokens=420, base_url="https://api.openai.com/v1"):
+    prompt_language = (language or "de").strip()
+    payload = {
+        "model": model,
+        "temperature": 0.3,
+        "max_tokens": int(max_output_tokens),
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You summarize weekly learning materials. "
+                    "Return a concise, clear summary that is pleasant to listen to as speech output."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Create a summary in language '{prompt_language}'. "
+                    "Length: about 140-220 words. "
+                    "Structure: 1 short intro sentence, then 4-6 bullet points, then 1 closing sentence. "
+                    "Avoid markdown links and avoid repeating file names unless essential.\n\n"
+                    f"Content:\n{source_text}"
+                ),
+            },
+        ],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        build_openai_chat_url(base_url),
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=90) as response:
+        raw = response.read().decode("utf-8")
+    data = json.loads(raw)
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("AI summary API returned no choices")
+    message = choices[0].get("message") or {}
+    content = (message.get("content") or "").strip()
+    if not content:
+        raise RuntimeError("AI summary API returned empty content")
+    return content
+
+
+def request_gemini_week_summary(source_text, api_key, model, language="de", max_output_tokens=None, base_url="https://generativelanguage.googleapis.com/v1beta"):
+    prompt_language = (language or "de").strip()
+    resolved_max_output_tokens = int(max_output_tokens) if max_output_tokens is not None else 2048
+    prompt_text = (
+        f"Create a summary in language '{prompt_language}'. "
+        "Length: about 140-220 words. "
+        "Structure: 1 short intro sentence, then 4-6 bullet points, then 1 closing sentence. "
+        "Avoid markdown links and avoid repeating file names unless essential.\n\n"
+        f"Content:\n{source_text}"
+    )
+    payload = {
+        "systemInstruction": {
+            "parts": [
+                {
+                    "text": (
+                        "You summarize weekly learning materials. "
+                        "Return a concise, clear summary that is pleasant to listen to as speech output."
+                    )
+                }
+            ]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": prompt_text,
+                    }
+                ],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": resolved_max_output_tokens,
+        },
+    }
+    request = Request(
+        build_gemini_generate_url(base_url, model, api_key),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=90) as response:
+        raw = response.read().decode("utf-8")
+    data = json.loads(raw)
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("Gemini summary API returned no candidates")
+    parts = ((candidates[0].get("content") or {}).get("parts") or [])
+    content = "\n".join((part.get("text") or "").strip() for part in parts if (part.get("text") or "").strip()).strip()
+    if not content:
+        raise RuntimeError("Gemini summary API returned empty content")
+    return content
+
+
+def request_ai_week_summary(source_text, api_provider, api_key, model, language="de", max_output_tokens=None, base_url=""):
+    provider = (api_provider or "openai").strip().lower()
+    if provider == "gemini":
+        return request_gemini_week_summary(
+            source_text,
+            api_key=api_key,
+            model=model,
+            language=language,
+            max_output_tokens=max_output_tokens,
+            base_url=base_url or "https://generativelanguage.googleapis.com/v1beta",
+        )
+    resolved_max_output_tokens = int(max_output_tokens) if max_output_tokens is not None else 420
+    return request_openai_week_summary(
+        source_text,
+        api_key=api_key,
+        model=model,
+        language=language,
+        max_output_tokens=resolved_max_output_tokens,
+        base_url=base_url or "https://api.openai.com/v1",
+    )
+
+
+def request_elevenlabs_tts(text, api_key, voice_id, model_id="eleven_multilingual_v2"):
+    payload = {
+        "text": text,
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": 0.45,
+            "similarity_boost": 0.8,
+        },
+    }
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{quote(str(voice_id).strip(), safe='')}"
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+            "xi-api-key": api_key,
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=120) as response:
+        audio_bytes = response.read()
+    if not audio_bytes:
+        raise RuntimeError("ElevenLabs returned empty audio")
+    return audio_bytes
+
+
+def wrap_pcm_as_wav(audio_bytes, sample_rate=24000, channels=1, sample_width=2):
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(int(channels))
+        wav_file.setsampwidth(int(sample_width))
+        wav_file.setframerate(int(sample_rate))
+        wav_file.writeframes(audio_bytes)
+    return buffer.getvalue()
+
+
+def request_gemini_tts(text, api_key, model="gemini-2.5-flash-preview-tts", voice_name="Kore", base_url="https://generativelanguage.googleapis.com/v1beta"):
+    wait_for_gemini_tts_slot(runtime_option("gemini_tts_min_interval_seconds", 5.0))
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": text,
+                    }
+                ],
+            }
+        ],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": (voice_name or "Kore").strip() or "Kore",
+                    }
+                }
+            },
+        },
+    }
+    request = Request(
+        build_gemini_generate_url(base_url, model, api_key),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=120) as response:
+        raw = response.read().decode("utf-8")
+
+    data = json.loads(raw)
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("Gemini TTS API returned no candidates")
+    parts = ((candidates[0].get("content") or {}).get("parts") or [])
+    for part in parts:
+        inline = part.get("inlineData") or {}
+        b64_audio = (inline.get("data") or "").strip()
+        if not b64_audio:
+            continue
+        mime_type = (inline.get("mimeType") or "audio/wav").strip() or "audio/wav"
+        try:
+            audio_bytes = base64.b64decode(b64_audio)
+        except Exception as exc:
+            raise RuntimeError(f"Gemini TTS audio decode failed: {exc}")
+        if audio_bytes:
+            if mime_type.lower().startswith("audio/l16"):
+                rate_match = re.search(r"rate=(\d+)", mime_type, flags=re.IGNORECASE)
+                sample_rate = int(rate_match.group(1)) if rate_match else 24000
+                audio_bytes = wrap_pcm_as_wav(audio_bytes, sample_rate=sample_rate, channels=1, sample_width=2)
+                mime_type = "audio/wav"
+            return audio_bytes, mime_type
+    raise RuntimeError("Gemini TTS API returned no audio payload")
+
+
+def is_retryable_api_error(exc):
+    if isinstance(exc, HTTPError):
+        return exc.code == 429 or 500 <= int(exc.code) <= 599
+    if isinstance(exc, (URLError, TimeoutError)):
+        return True
+    return False
+
+
+def parse_retry_after_seconds(exc):
+    if not isinstance(exc, HTTPError):
+        return None
+    retry_after = ""
+    try:
+        retry_after = (exc.headers.get("Retry-After") or "").strip()
+    except Exception:
+        retry_after = ""
+    if not retry_after:
+        return None
+    if re.fullmatch(r"\d+", retry_after):
+        return max(1.0, float(int(retry_after)))
+    return None
+
+
+def wait_for_gemini_tts_slot(min_interval_seconds):
+    global LAST_GEMINI_TTS_REQUEST_TS
+    interval = max(current_gemini_tts_interval_seconds(), float(min_interval_seconds or 0.0))
+    if interval <= 0:
+        LAST_GEMINI_TTS_REQUEST_TS = time.time()
+        return
+    now = time.time()
+    elapsed = now - float(LAST_GEMINI_TTS_REQUEST_TS or 0.0)
+    if elapsed < interval:
+        time.sleep(interval - elapsed)
+    LAST_GEMINI_TTS_REQUEST_TS = time.time()
+
+
+def call_with_retries(action, label="request", max_attempts=3, base_delay_seconds=1.0, on_retry=None, on_success=None):
+    max_tries = max(1, int(max_attempts or 1))
+    delay = max(0.1, float(base_delay_seconds or 1.0))
+    last_exc = None
+    for attempt in range(1, max_tries + 1):
+        try:
+            result = action()
+            if on_success is not None:
+                on_success()
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_tries or not is_retryable_api_error(exc):
+                raise
+            wait_seconds = delay * (2 ** (attempt - 1))
+            if on_retry is not None:
+                suggested_wait = on_retry(exc, attempt, max_tries)
+                if suggested_wait is not None:
+                    wait_seconds = max(wait_seconds, float(suggested_wait))
+            retry_after_seconds = parse_retry_after_seconds(exc)
+            if retry_after_seconds is not None:
+                wait_seconds = max(wait_seconds, retry_after_seconds)
+            print(f"[retry] {label} failed (attempt {attempt}/{max_tries}): {exc}. Retrying in {wait_seconds:.1f}s")
+            time.sleep(wait_seconds)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"{label} failed unexpectedly")
+
+
+def upsert_ai_summary_block(markdown_text, summary_text, audio_relative_link=None):
+    cleaned = remove_generated_ai_section(markdown_text)
+    block_lines = [
+        "<!-- AI_WEEK_SUMMARY_START -->",
+        "## AI Weekly Summary",
+        "",
+        summary_text.strip(),
+    ]
+    if audio_relative_link:
+        block_lines.extend([
+            "",
+            "## Audio Version",
+            "",
+            f"[Play AI summary audio]({audio_relative_link})",
+        ])
+    block_lines.append("<!-- AI_WEEK_SUMMARY_END -->")
+    block = "\n".join(block_lines).strip()
+    if not cleaned:
+        return f"{block}\n"
+    return f"{cleaned}\n\n{block}\n"
+
+
+def parse_existing_ai_summary_block(markdown_text):
+    text = "" if markdown_text is None else str(markdown_text)
+    match = re.search(
+        r"<!-- AI_WEEK_SUMMARY_START -->(.*?)<!-- AI_WEEK_SUMMARY_END -->",
+        text,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return {"summary": "", "audio_link": ""}
+
+    block = match.group(1)
+    summary_match = re.search(
+        r"##\s+AI Weekly Summary\s*(.*?)(?:\n##\s+Audio Version|\Z)",
+        block,
+        flags=re.DOTALL,
+    )
+    summary = (summary_match.group(1) if summary_match else "").strip()
+
+    audio_match = re.search(r"\[Play AI summary audio\]\(([^)]+)\)", block)
+    audio_link = (audio_match.group(1) if audio_match else "").strip()
+
+    return {"summary": summary, "audio_link": audio_link}
+
+
+def resolve_existing_audio_path(output_path, week_relative_path, audio_link):
+    if not audio_link:
+        return None
+    normalized = str(audio_link).strip().replace("\\", "/")
+    if not normalized:
+        return None
+    if re.match(r"^[a-z]+://", normalized, flags=re.IGNORECASE):
+        return None
+    week_dir = (output_path / week_relative_path).resolve().parent
+    candidate = (week_dir / normalized).resolve()
+    if candidate.exists() and candidate.is_file():
+        return candidate
+    return None
+
+
+def enrich_week_pages_with_ai_summary_and_audio(
+    output_dir,
+    week_pages_manifest,
+    ai_week_summary=False,
+    ai_summary_provider="openai",
+    ai_summary_model="gpt-4o-mini",
+    ai_summary_language="de",
+    ai_summary_max_chars=12000,
+    ai_summary_base_url="https://api.openai.com/v1",
+    gemini_tts=False,
+    gemini_tts_model="gemini-2.5-flash-preview-tts",
+    gemini_tts_voice="Kore",
+    gemini_tts_base_url="https://generativelanguage.googleapis.com/v1beta",
+    gemini_tts_min_interval_seconds=5.0,
+    elevenlabs_tts=False,
+    elevenlabs_voice_id="",
+    elevenlabs_model_id="eleven_multilingual_v2",
+    audio_only_missing=False,
+):
+    effective_audio = bool(gemini_tts or elevenlabs_tts)
+    effective_ai_summary = bool(ai_week_summary or effective_audio)
+    result = {
+        "enabled": bool(ai_week_summary or effective_audio),
+        "processed": 0,
+        "summaries_created": 0,
+        "summaries_skipped_manifest": 0,
+        "audio_created": 0,
+        "audio_skipped_existing": 0,
+        "audio_skipped_manifest": 0,
+        "audio_provider": "gemini" if gemini_tts else ("elevenlabs" if elevenlabs_tts else "none"),
+        "adaptive_rate_limit": False,
+        "gemini_tts_429_count": 0,
+        "gemini_tts_max_interval_seconds": 0.0,
+        "gemini_tts_final_interval_seconds": 0.0,
+        "errors": [],
+    }
+    if not result["enabled"]:
+        return result
+
+    if not week_pages_manifest:
+        result["errors"].append("No week pages found for AI summary/audio processing.")
+        return result
+
+    provider = (ai_summary_provider or "openai").strip().lower()
+    ai_api_key = ""
+    if provider == "gemini":
+        ai_api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+    else:
+        ai_api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    elevenlabs_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
+    resolved_voice_id = (elevenlabs_voice_id or os.environ.get("ELEVENLABS_VOICE_ID") or "").strip()
+    gemini_tts_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+
+    if effective_ai_summary and not ai_api_key:
+        if provider == "gemini":
+            result["errors"].append("GEMINI_API_KEY or GOOGLE_API_KEY is required for AI week summaries with provider 'gemini'.")
+        else:
+            result["errors"].append("OPENAI_API_KEY is required for AI week summaries with provider 'openai'.")
+        return result
+
+    if elevenlabs_tts and not elevenlabs_key:
+        result["errors"].append("ELEVENLABS_API_KEY is required for audio generation.")
+        return result
+
+    if elevenlabs_tts and not resolved_voice_id:
+        result["errors"].append("ELEVENLABS_VOICE_ID or --elevenlabs-voice-id is required for audio generation.")
+        return result
+
+    if gemini_tts and provider != "gemini":
+        result["errors"].append("Gemini TTS requires --ai-summary-provider gemini.")
+        return result
+
+    if gemini_tts and not gemini_tts_key:
+        result["errors"].append("GEMINI_API_KEY or GOOGLE_API_KEY is required for Gemini audio generation.")
+        return result
+
+    output_path = Path(output_dir)
+    audio_dir = output_path / "files" / "audio"
+    if effective_audio:
+        audio_dir.mkdir(parents=True, exist_ok=True)
+    resume_done_jobs = bool(audio_only_missing and runtime_option("ai_jobs_resume_done", False))
+
+    # Phase 1: Create/reuse all summaries first.
+    audio_tasks = []
+    for week_index, page_meta in enumerate(week_pages_manifest, start=1):
+        relative_path = (page_meta or {}).get("relative_path") or ""
+        if not relative_path:
+            continue
+        week_path = output_path / relative_path
+        if not week_path.exists():
+            result["errors"].append(f"Week page not found: {relative_path}")
+            continue
+
+        try:
+            original_markdown = week_path.read_text(encoding="utf-8")
+            existing_block = parse_existing_ai_summary_block(original_markdown)
+            existing_summary = (existing_block.get("summary") or "").strip()
+            existing_audio_link = (existing_block.get("audio_link") or "").strip()
+            week_stem = re.sub(r"[^a-z0-9_-]+", "-", week_path.stem.lower()).strip("-") or f"week-{week_index:02d}"
+            summary_job_id = f"week_summary:{week_index:02d}:{week_stem}"
+            audio_job_id = f"week_audio:{week_index:02d}:{week_stem}"
+
+            source_for_summary = remove_generated_ai_section(original_markdown)
+            plain_text = markdown_to_plain_text_for_summary(source_for_summary)
+            plain_text = plain_text[: max(1000, int(ai_summary_max_chars or 12000))] if plain_text else ""
+            summary_input_markdown = write_ai_job_markdown(
+                output_dir,
+                "input",
+                f"week_{week_index:02d}_{week_stem}_source",
+                plain_text or existing_summary,
+                title=f"Week Summary Input: {week_index:02d} {week_stem}",
+            )
+
+            append_ai_job_manifest(output_dir, {
+                "job_type": "week_summary",
+                "job_id": summary_job_id,
+                "status": "queued",
+                "provider": provider,
+                "week_relative_path": relative_path,
+                "input_markdown": summary_input_markdown,
+            })
+
+            summary_text = existing_summary if (audio_only_missing and existing_summary) else ""
+            if effective_ai_summary and not summary_text:
+                if resume_done_jobs and is_ai_job_done(output_dir, summary_job_id) and existing_summary:
+                    summary_text = existing_summary
+                    result["summaries_skipped_manifest"] += 1
+                    append_ai_job_manifest(output_dir, {
+                        "job_type": "week_summary",
+                        "job_id": summary_job_id,
+                        "status": "skipped",
+                        "reason": "already done (manifest resume)",
+                        "provider": provider,
+                        "week_relative_path": relative_path,
+                        "input_markdown": summary_input_markdown,
+                    })
+                else:
+                    if not plain_text:
+                        raise RuntimeError("Week page has no text content for summary generation")
+                    summary_text = call_with_retries(
+                        lambda: request_ai_week_summary(
+                            plain_text,
+                            api_provider=provider,
+                            api_key=ai_api_key,
+                            model=(ai_summary_model or "gpt-4o-mini"),
+                            language=ai_summary_language,
+                            base_url=ai_summary_base_url,
+                        ),
+                        label=f"week summary {relative_path}",
+                        max_attempts=3,
+                        base_delay_seconds=1.0,
+                    )
+                    result["summaries_created"] += 1
+                    append_ai_job_manifest(output_dir, {
+                        "job_type": "week_summary",
+                        "job_id": summary_job_id,
+                        "status": "done",
+                        "provider": provider,
+                        "week_relative_path": relative_path,
+                        "input_markdown": summary_input_markdown,
+                    })
+            elif summary_text:
+                append_ai_job_manifest(output_dir, {
+                    "job_type": "week_summary",
+                    "job_id": summary_job_id,
+                    "status": "reused",
+                    "provider": provider,
+                    "week_relative_path": relative_path,
+                    "input_markdown": summary_input_markdown,
+                })
+
+            if not summary_text:
+                raise RuntimeError("Summary generation returned empty text")
+
+            summary_output_markdown = write_ai_job_markdown(
+                output_dir,
+                "output",
+                f"week_{week_index:02d}_{week_stem}_summary",
+                summary_text,
+                title=f"Week Summary Output: {week_index:02d} {week_stem}",
+            )
+
+            # Ensure summary is persisted before audio phase.
+            week_path.write_text(
+                upsert_ai_summary_block(original_markdown, summary_text, audio_relative_link=None),
+                encoding="utf-8",
+            )
+
+            audio_tasks.append({
+                "week_index": week_index,
+                "week_stem": week_stem,
+                "relative_path": relative_path,
+                "week_path": week_path,
+                "original_markdown": week_path.read_text(encoding="utf-8"),
+                "summary_text": summary_text,
+                "summary_input_markdown": summary_input_markdown,
+                "summary_output_markdown": summary_output_markdown,
+                "existing_audio_link": existing_audio_link,
+                "summary_job_id": summary_job_id,
+                "audio_job_id": audio_job_id,
+            })
+            result["processed"] += 1
+        except Exception as exc:
+            append_ai_job_manifest(output_dir, {
+                "job_type": "week_pipeline",
+                "job_id": f"week_pipeline:{week_index:02d}",
+                "status": "error",
+                "week_relative_path": relative_path,
+                "error": str(exc),
+            })
+            result["errors"].append(f"{relative_path}: {exc}")
+
+    # Phase 2: Create audio from prepared summaries.
+    if effective_audio:
+        for task in audio_tasks:
+            week_index = task["week_index"]
+            week_stem = task["week_stem"]
+            relative_path = task["relative_path"]
+            week_path = task["week_path"]
+            summary_text = task["summary_text"]
+            summary_input_markdown = task["summary_input_markdown"]
+            summary_output_markdown = task["summary_output_markdown"]
+            existing_audio_link = task["existing_audio_link"]
+            audio_job_id = task["audio_job_id"]
+            original_markdown = task["original_markdown"]
+
+            try:
+                audio_rel = None
+                if audio_only_missing:
+                    existing_audio_path = resolve_existing_audio_path(output_path, relative_path, existing_audio_link)
+                    if existing_audio_path is not None:
+                        audio_rel = existing_audio_link
+                        result["audio_skipped_existing"] += 1
+                        append_ai_job_manifest(output_dir, {
+                            "job_type": "week_audio",
+                            "job_id": audio_job_id,
+                            "status": "skipped",
+                            "reason": "audio already exists and audio_only_missing is enabled",
+                            "week_relative_path": relative_path,
+                            "audio_relative_path": audio_rel,
+                        })
+
+                if audio_rel is None and resume_done_jobs and is_ai_job_done(output_dir, audio_job_id):
+                    prior_audio = latest_ai_job_record(output_dir, audio_job_id) or {}
+                    prior_audio_rel = str(prior_audio.get("audio_relative_path") or "").strip()
+                    resolved_prior_audio = resolve_existing_audio_path(output_path, relative_path, prior_audio_rel)
+                    if resolved_prior_audio is not None:
+                        audio_rel = prior_audio_rel
+                        result["audio_skipped_manifest"] += 1
+                        append_ai_job_manifest(output_dir, {
+                            "job_type": "week_audio",
+                            "job_id": audio_job_id,
+                            "status": "skipped",
+                            "provider": result["audio_provider"],
+                            "reason": "already done (manifest resume)",
+                            "week_relative_path": relative_path,
+                            "audio_relative_path": audio_rel,
+                            "input_markdown": summary_output_markdown or summary_input_markdown,
+                        })
+
+                if audio_rel is None:
+                    append_ai_job_manifest(output_dir, {
+                        "job_type": "week_audio",
+                        "job_id": audio_job_id,
+                        "status": "queued",
+                        "provider": result["audio_provider"],
+                        "week_relative_path": relative_path,
+                        "input_markdown": summary_output_markdown or summary_input_markdown,
+                    })
+
+                    if gemini_tts:
+                        audio_bytes, audio_mime = call_with_retries(
+                            lambda: request_gemini_tts(
+                                summary_text,
+                                api_key=gemini_tts_key,
+                                model=(gemini_tts_model or "gemini-2.5-flash-preview-tts"),
+                                voice_name=(gemini_tts_voice or "Kore"),
+                                base_url=gemini_tts_base_url,
+                            ),
+                            label=f"gemini tts {relative_path}",
+                            max_attempts=5,
+                            base_delay_seconds=2.0,
+                            on_retry=on_gemini_tts_retry,
+                            on_success=on_gemini_tts_success,
+                        )
+                        ext = ".wav"
+                        if "mpeg" in (audio_mime or "").lower():
+                            ext = ".mp3"
+                        elif "ogg" in (audio_mime or "").lower():
+                            ext = ".ogg"
+                        elif "aac" in (audio_mime or "").lower():
+                            ext = ".aac"
+                    else:
+                        audio_bytes = call_with_retries(
+                            lambda: request_elevenlabs_tts(
+                                summary_text,
+                                api_key=elevenlabs_key,
+                                voice_id=resolved_voice_id,
+                                model_id=(elevenlabs_model_id or "eleven_multilingual_v2"),
+                            ),
+                            label=f"elevenlabs tts {relative_path}",
+                            max_attempts=3,
+                            base_delay_seconds=1.5,
+                        )
+                        ext = ".mp3"
+
+                    audio_name = f"{week_index:02d}_{week_stem}_summary{ext}"
+                    audio_path = audio_dir / audio_name
+                    audio_path.write_bytes(audio_bytes)
+                    audio_rel = ensure_explicit_relative_path(encode_relative_path(f"../files/audio/{audio_name}"))
+                    result["audio_created"] += 1
+                    append_ai_job_manifest(output_dir, {
+                        "job_type": "week_audio",
+                        "job_id": audio_job_id,
+                        "status": "done",
+                        "provider": result["audio_provider"],
+                        "week_relative_path": relative_path,
+                        "input_markdown": summary_output_markdown or summary_input_markdown,
+                        "audio_relative_path": audio_rel,
+                    })
+
+                week_path.write_text(
+                    upsert_ai_summary_block(original_markdown, summary_text, audio_relative_link=audio_rel),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                append_ai_job_manifest(output_dir, {
+                    "job_type": "week_audio",
+                    "job_id": audio_job_id,
+                    "status": "error",
+                    "provider": result["audio_provider"],
+                    "week_relative_path": relative_path,
+                    "error": str(exc),
+                })
+                result["errors"].append(f"{relative_path}: audio phase: {exc}")
+
+    if gemini_tts:
+        final_interval = float(current_gemini_tts_interval_seconds())
+        max_interval = max(float(ADAPTIVE_RATE_STATE.get("gemini_tts_max_interval") or 0.0), final_interval)
+        count_429 = int(ADAPTIVE_RATE_STATE.get("gemini_tts_429_count") or 0)
+        result["adaptive_rate_limit"] = bool(count_429 > 0)
+        result["gemini_tts_429_count"] = count_429
+        result["gemini_tts_max_interval_seconds"] = round(max_interval, 2)
+        result["gemini_tts_final_interval_seconds"] = round(final_interval, 2)
+
+    return result
 
 
 def try_build_native_attachment_block(display_title, line, asset_lookup):
@@ -1892,41 +2990,37 @@ def render_url_content(actividad, DIR_COPIA, DIR, heading_level=3):
             else:
                 kind = "file"
         except Exception as exc:
-            link_target = create_external_link_note(external_url, titulo, DIR, str(exc))
-            kind = "file"
+            return build_external_source_warning_block(titulo, external_url, heading_level=heading_level, error_message=str(exc))
 
     return build_affine_embed_block(titulo, link_target, kind, DIR, heading_level=heading_level)
 
-def getAssign(actividad,DIR_COPIA,DIR,FICHERO):
-    content = render_assign_content(actividad, DIR_COPIA, DIR)
+def getAssign(actividad, DIR_COPIA, DIR, FICHERO, media_prefix="img/", relative_prefix=""):
+    content = render_assign_content(actividad, DIR_COPIA, DIR, heading_level=3, media_prefix=media_prefix, relative_prefix=relative_prefix)
     if content:
-        escribir(DIR,FICHERO, content)
+        escribir(DIR, FICHERO, content)
 
 
-def render_assign_content(actividad, DIR_COPIA, DIR):
+def render_assign_content(actividad, DIR_COPIA, DIR, heading_level=3, media_prefix="../img/", relative_prefix="../"):
     docassign=etree.parse(DIR_COPIA+"/%s/calendar.xml" % actividad.find("directory").text)
     titulo = normalizar_html(actividad.find("title").text)
-    nomfich=getNombreFichero(titulo)
     textos = []
 
     if len(docassign.getroot())>0:
         for event in docassign.getroot():
-            descripcion = normalizar_html(event.findtext("description"), "../img/", DIR, "../")
+            descripcion = normalizar_html(event.findtext("description"), media_prefix, DIR, relative_prefix)
             if descripcion and descripcion not in textos:
                 textos.append(descripcion)
     else:
         docassign=etree.parse(DIR_COPIA+"/%s/assign.xml" % actividad.find("directory").text)
-        descripcion = normalizar_html(docassign.findtext("assign/intro"), "../img/", DIR, "../")
+        descripcion = normalizar_html(docassign.findtext("assign/intro"), media_prefix, DIR, relative_prefix)
         if descripcion:
             textos.append(descripcion)
 
-    if len(textos)>0:
-        crear_fichero(nomfich, DIR+"doc/")
-        escribir(DIR+"doc/",nomfich,"# %s" % titulo)
-        for texto in textos:
-            escribir(DIR+"doc/",nomfich)
-            escribir(DIR+"doc/",nomfich,texto)
-    return "* [%s](%s)"%(titulo, ensure_explicit_relative_path(encode_relative_path("doc/"+nomfich)))
+    heading = "#" * max(1, heading_level)
+    if textos:
+        body = "\n\n".join(textos)
+        return f"\n{heading} {titulo}\n\n{body}\n"
+    return f"\n{heading} {titulo}\n"
 
 def getResource(actividad,DIR_COPIA,DIR,FICHERO):
     content = render_resource_content(actividad, DIR_COPIA, DIR)
@@ -1941,8 +3035,17 @@ def render_resource_content(actividad, DIR_COPIA, DIR, heading_level=3):
     fichero=docfiles.xpath("//file[contextid=%s]"%fileid)
     titulo = normalizar_html(actividad.find("title").text)
     try:
-        shutil.copyfile(DIR_COPIA+"/files/%s/%s"%(fichero[0].find("contenthash").text[0:2],fichero[0].find("contenthash").text),DIR+"files/%s"%fichero[0].find("filename").text)
-        target = encode_relative_path("files/"+fichero[0].find("filename").text)
+        source_hash = (fichero[0].find("contenthash").text or "").strip()
+        source_file = DIR_COPIA+"/files/%s/%s"%(source_hash[0:2], source_hash)
+        destination_dir = Path(DIR) / "files"
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = ensure_unique_file_destination(
+            destination_dir,
+            fichero[0].find("filename").text,
+            discriminator=source_hash[:8],
+        )
+        shutil.copyfile(source_file, str(destination))
+        target = encode_relative_path("files/" + destination.name)
         kind = "pdf" if target.lower().endswith('.pdf') else "file"
         return build_affine_embed_block(titulo, target, kind, DIR, heading_level=heading_level)
     except:
@@ -1950,23 +3053,20 @@ def render_resource_content(actividad, DIR_COPIA, DIR, heading_level=3):
         print(actividad.find("directory").text, fileid)
         return None
 
-def getPage(actividad,DIR_COPIA,DIR,FICHERO):
-    content = render_page_content(actividad, DIR_COPIA, DIR)
+def getPage(actividad, DIR_COPIA, DIR, FICHERO, media_prefix="img/", relative_prefix=""):
+    content = render_page_content(actividad, DIR_COPIA, DIR, heading_level=3, media_prefix=media_prefix, relative_prefix=relative_prefix)
     if content:
-        escribir(DIR,FICHERO, content)
+        escribir(DIR, FICHERO, content)
 
 
-def render_page_content(actividad, DIR_COPIA, DIR):
+def render_page_content(actividad, DIR_COPIA, DIR, heading_level=3, media_prefix="../img/", relative_prefix="../"):
     docpage=etree.parse(DIR_COPIA+"/%s/page.xml" % actividad.find("directory").text)
     titulo = normalizar_html(actividad.find("title").text)
-    nomfich=getNombreFichero(titulo)
-    contenido = normalizar_html(docpage.findtext("page/content"), "../img/", DIR, "../")
+    contenido = normalizar_html(docpage.findtext("page/content"), media_prefix, DIR, relative_prefix)
+    heading = "#" * max(1, heading_level)
     if contenido:
-        crear_fichero(nomfich, DIR+"doc/")
-        escribir(DIR+"doc/",nomfich,"# %s" % titulo)
-        escribir(DIR+"doc/",nomfich)
-        escribir(DIR+"doc/",nomfich,contenido)
-    return "* [%s](%s)"%(titulo, ensure_explicit_relative_path(encode_relative_path("doc/"+nomfich)))
+        return f"\n{heading} {titulo}\n\n{contenido}\n"
+    return f"\n{heading} {titulo}\n"
 
 
 def build_structured_activity_entry(actividad, DIR_COPIA, DIR, current_bucket):
@@ -1990,13 +3090,13 @@ def build_structured_activity_entry(actividad, DIR_COPIA, DIR, current_bucket):
         content = render_url_content(actividad, DIR_COPIA, DIR, heading_level=4)
         default_bucket = "materialien"
     elif tipo == "assign":
-        content = render_assign_content(actividad, DIR_COPIA, DIR)
+        content = render_assign_content(actividad, DIR_COPIA, DIR, heading_level=4)
         default_bucket = "aufgaben"
     elif tipo == "resource":
         content = render_resource_content(actividad, DIR_COPIA, DIR, heading_level=4)
         default_bucket = "materialien"
     elif tipo == "page":
-        content = render_page_content(actividad, DIR_COPIA, DIR)
+        content = render_page_content(actividad, DIR_COPIA, DIR, heading_level=4)
         default_bucket = "inhalte"
     elif tipo in {"forum", "wiki", "chat"}:
         content = "* %s" % plain_title if plain_title else None
@@ -2034,7 +3134,7 @@ def write_structured_section(DIR_COPIA, DIR, FICHERO, section_heading, summary, 
     render_structured_section(DIR, FICHERO, section_heading, sections)
 
 
-def write_classic_section(DIR_COPIA, DIR, FICHERO, section_title, summary, actividades):
+def write_classic_section(DIR_COPIA, DIR, FICHERO, section_title, summary, actividades, media_prefix="../img/", relative_prefix="../"):
     if section_title:
         escribir(DIR,FICHERO)
         escribir(DIR,FICHERO,"## %s" % section_title)
@@ -2050,11 +3150,11 @@ def write_classic_section(DIR_COPIA, DIR, FICHERO, section_title, summary, activ
         elif tipo=="url":
             getUrl(actividad,DIR_COPIA,DIR,FICHERO)
         elif tipo=="assign":
-            getAssign(actividad,DIR_COPIA,DIR,FICHERO)
+            getAssign(actividad,DIR_COPIA,DIR,FICHERO, media_prefix=media_prefix, relative_prefix=relative_prefix)
         elif tipo=="resource":
             getResource(actividad,DIR_COPIA,DIR,FICHERO)
         elif tipo=="page":
-            getPage(actividad,DIR_COPIA,DIR,FICHERO)
+            getPage(actividad,DIR_COPIA,DIR,FICHERO, media_prefix=media_prefix, relative_prefix=relative_prefix)
         else:
             escribir(DIR,FICHERO, "* %s (%s)" % (normalizar_html(actividad.find("title").text), actividad.find("modulename").text))
 
@@ -2114,9 +3214,23 @@ def getSeccionesActividades(DIR_COPIA,DIR,FICHERO, structured_weeks=False, week_
             )
             continue
 
-        write_classic_section(DIR_COPIA, DIR, FICHERO, section_heading, summary, actividades)
+        write_classic_section(DIR_COPIA, DIR, FICHERO, section_heading, summary, actividades, media_prefix="img/", relative_prefix="")
 
     return generated_week_pages
+
+
+def discover_existing_week_pages_manifest(output_dir):
+    output_path = Path(output_dir)
+    doc_dir = output_path / "doc"
+    manifest = []
+    if not doc_dir.exists():
+        return manifest
+    for item in sorted(doc_dir.glob("*.md")):
+        manifest.append({
+            "title": item.stem,
+            "relative_path": f"doc/{item.name}",
+        })
+    return manifest
 
 
 def convert_course(
@@ -2132,8 +3246,25 @@ def convert_course(
     pdf_text_engine="auto",
     pdf_text_max_pages=8,
     pdf_text_max_chars=20000,
+    pdf_text_audio=None,
+    pdf_text_audio_min_chars=300,
     pdf_text_ocr_fallback=None,
     pdf_text_ocr_lang="eng",
+    ai_week_summary=False,
+    ai_summary_provider="openai",
+    ai_summary_model="gpt-4o-mini",
+    ai_summary_language="de",
+    ai_summary_max_chars=12000,
+    ai_summary_base_url="https://api.openai.com/v1",
+    gemini_tts=False,
+    gemini_tts_model="gemini-2.5-flash-preview-tts",
+    gemini_tts_voice="Kore",
+    gemini_tts_base_url="https://generativelanguage.googleapis.com/v1beta",
+    gemini_tts_min_interval_seconds=5.0,
+    audio_only_missing=False,
+    elevenlabs_tts=False,
+    elevenlabs_voice_id="",
+    elevenlabs_model_id="eleven_multilingual_v2",
     notebooklm_export=False,
     notebooklm_zip=None,
 ):
@@ -2149,9 +3280,11 @@ def convert_course(
 
     DIR = target_dir.rstrip(os.sep) + os.sep
     FICHERO="README.md"
+    resume_from_existing_output = bool(audio_only_missing and os.path.isdir(target_dir) and os.path.isdir(os.path.join(target_dir, "doc")))
     effective_week_pages = week_pages or native_week_pages or notebooklm_export
     effective_notebooklm_zip = bool(notebooklm_export) if notebooklm_zip is None else bool(notebooklm_zip)
     effective_pdf_text_ocr_fallback = bool(pdf_text_blocks) if pdf_text_ocr_fallback is None else bool(pdf_text_ocr_fallback)
+    effective_pdf_text_audio = bool(pdf_text_blocks and (gemini_tts or elevenlabs_tts)) if pdf_text_audio is None else bool(pdf_text_audio)
     configure_runtime_options(
         pdf_text_blocks=bool(pdf_text_blocks),
         pdf_text_engine=str(pdf_text_engine or "auto").strip().lower(),
@@ -2159,17 +3292,57 @@ def convert_course(
         pdf_text_max_chars=max(500, int(pdf_text_max_chars or 20000)),
         pdf_text_ocr_fallback=effective_pdf_text_ocr_fallback,
         pdf_text_ocr_lang=str(pdf_text_ocr_lang or "eng").strip() or "eng",
+        pdf_text_audio=effective_pdf_text_audio,
+        pdf_text_audio_min_chars=max(100, int(pdf_text_audio_min_chars or 300)),
+        tts_provider=("gemini" if gemini_tts else ("elevenlabs" if elevenlabs_tts else "none")),
+        gemini_tts_model=str(gemini_tts_model or "gemini-2.5-flash-preview-tts").strip() or "gemini-2.5-flash-preview-tts",
+        gemini_tts_voice=str(gemini_tts_voice or "Kore").strip() or "Kore",
+        gemini_tts_base_url=str(gemini_tts_base_url or "https://generativelanguage.googleapis.com/v1beta").strip() or "https://generativelanguage.googleapis.com/v1beta",
+        gemini_tts_min_interval_seconds=max(0.0, float(gemini_tts_min_interval_seconds or 0.0)),
+        elevenlabs_model_id=str(elevenlabs_model_id or "eleven_multilingual_v2").strip() or "eleven_multilingual_v2",
+        elevenlabs_voice_id=str(elevenlabs_voice_id or "").strip(),
+        ai_jobs_resume_done=bool(audio_only_missing),
     )
+    reset_adaptive_rate_state()
+    reset_ai_job_status_cache()
     PDF_TEXT_CACHE.clear()
-    crear_directorios(DIR,FICHERO)
-    copiar_imagenes(dir_copia,DIR)
-    getTituloDescripcion(dir_copia,DIR,FICHERO)
-    week_pages_manifest = getSeccionesActividades(
-        dir_copia,
-        DIR,
-        FICHERO,
-        structured_weeks=structured_weeks,
-        week_pages=effective_week_pages,
+    if resume_from_existing_output:
+        print("[resume] Using existing output directory for missing-audio processing.")
+        week_pages_manifest = discover_existing_week_pages_manifest(target_dir)
+        if not week_pages_manifest:
+            raise FileNotFoundError(
+                f"audio-only-missing mode requires existing week markdown pages in {Path(target_dir) / 'doc'}"
+            )
+    else:
+        crear_directorios(DIR,FICHERO)
+        copiar_imagenes(dir_copia,DIR)
+        getTituloDescripcion(dir_copia,DIR,FICHERO)
+        week_pages_manifest = getSeccionesActividades(
+            dir_copia,
+            DIR,
+            FICHERO,
+            structured_weeks=structured_weeks,
+            week_pages=effective_week_pages,
+        )
+
+    ai_audio_result = enrich_week_pages_with_ai_summary_and_audio(
+        target_dir,
+        week_pages_manifest,
+        ai_week_summary=bool(ai_week_summary),
+        ai_summary_provider=str(ai_summary_provider or "openai").strip().lower() or "openai",
+        ai_summary_model=str(ai_summary_model or "gpt-4o-mini").strip() or "gpt-4o-mini",
+        ai_summary_language=str(ai_summary_language or "de").strip() or "de",
+        ai_summary_max_chars=max(1000, int(ai_summary_max_chars or 12000)),
+        ai_summary_base_url=str(ai_summary_base_url or "https://api.openai.com/v1").strip() or "https://api.openai.com/v1",
+        gemini_tts=bool(gemini_tts),
+        gemini_tts_model=str(gemini_tts_model or "gemini-2.5-flash-preview-tts").strip() or "gemini-2.5-flash-preview-tts",
+        gemini_tts_voice=str(gemini_tts_voice or "Kore").strip() or "Kore",
+        gemini_tts_base_url=str(gemini_tts_base_url or "https://generativelanguage.googleapis.com/v1beta").strip() or "https://generativelanguage.googleapis.com/v1beta",
+        gemini_tts_min_interval_seconds=max(0.0, float(gemini_tts_min_interval_seconds or 0.0)),
+        audio_only_missing=bool(audio_only_missing),
+        elevenlabs_tts=bool(elevenlabs_tts),
+        elevenlabs_voice_id=str(elevenlabs_voice_id or "").strip(),
+        elevenlabs_model_id=str(elevenlabs_model_id or "eleven_multilingual_v2").strip() or "eleven_multilingual_v2",
     )
 
     readme_path = os.path.join(target_dir, FICHERO)
@@ -2216,6 +3389,11 @@ def convert_course(
             notebooklm_error = f"NotebookLM export failed: {exc}"
             print(notebooklm_error)
 
+    ai_jobs_root = Path(target_dir) / "files" / "ai_jobs"
+    ai_jobs_manifest_path = ai_jobs_root / "manifest.jsonl"
+    ai_jobs_input_dir = ai_jobs_root / "input"
+    ai_jobs_output_dir = ai_jobs_root / "output"
+
     return {
         "output_dir": target_dir,
         "readme": readme_path,
@@ -2230,12 +3408,34 @@ def convert_course(
         "week_pages": week_pages,
         "native_week_pages": native_week_pages,
         "effective_week_pages": effective_week_pages,
+        "resume_from_existing_output": resume_from_existing_output,
         "pdf_text_blocks": bool(pdf_text_blocks),
         "pdf_text_engine": str(pdf_text_engine or "auto"),
         "pdf_text_max_pages": max(1, int(pdf_text_max_pages or 8)),
         "pdf_text_max_chars": max(500, int(pdf_text_max_chars or 20000)),
+        "pdf_text_audio": effective_pdf_text_audio,
+        "pdf_text_audio_min_chars": max(100, int(pdf_text_audio_min_chars or 300)),
         "pdf_text_ocr_fallback": effective_pdf_text_ocr_fallback,
         "pdf_text_ocr_lang": str(pdf_text_ocr_lang or "eng").strip() or "eng",
+        "ai_week_summary": bool(ai_week_summary),
+        "ai_summary_provider": str(ai_summary_provider or "openai").strip().lower() or "openai",
+        "ai_summary_model": str(ai_summary_model or "gpt-4o-mini").strip() or "gpt-4o-mini",
+        "ai_summary_language": str(ai_summary_language or "de").strip() or "de",
+        "ai_summary_max_chars": max(1000, int(ai_summary_max_chars or 12000)),
+        "ai_summary_base_url": str(ai_summary_base_url or "https://api.openai.com/v1").strip() or "https://api.openai.com/v1",
+        "gemini_tts": bool(gemini_tts),
+        "gemini_tts_model": str(gemini_tts_model or "gemini-2.5-flash-preview-tts").strip() or "gemini-2.5-flash-preview-tts",
+        "gemini_tts_voice": str(gemini_tts_voice or "Kore").strip() or "Kore",
+        "gemini_tts_base_url": str(gemini_tts_base_url or "https://generativelanguage.googleapis.com/v1beta").strip() or "https://generativelanguage.googleapis.com/v1beta",
+        "gemini_tts_min_interval_seconds": max(0.0, float(gemini_tts_min_interval_seconds or 0.0)),
+        "audio_only_missing": bool(audio_only_missing),
+        "elevenlabs_tts": bool(elevenlabs_tts),
+        "elevenlabs_voice_id": str(elevenlabs_voice_id or "").strip(),
+        "elevenlabs_model_id": str(elevenlabs_model_id or "eleven_multilingual_v2").strip() or "eleven_multilingual_v2",
+        "ai_audio_result": ai_audio_result,
+        "ai_jobs_manifest": str(ai_jobs_manifest_path) if ai_jobs_manifest_path.exists() else None,
+        "ai_jobs_input_dir": str(ai_jobs_input_dir) if ai_jobs_input_dir.exists() else None,
+        "ai_jobs_output_dir": str(ai_jobs_output_dir) if ai_jobs_output_dir.exists() else None,
         "notebooklm_export": bool(notebooklm_export),
         "notebooklm_zip": effective_notebooklm_zip,
         "notebooklm_folder": notebooklm_folder,
@@ -2255,14 +3455,32 @@ def main():
     parser.add_argument('--structured-weeks', action='store_true', help='group each course week into fixed sections like Learning Goals, Content, Materials and Assignments')
     parser.add_argument('--week-pages', action='store_true', help='keep the course description on the main page and export each week as a linked Markdown subpage')
     parser.add_argument('--native-week-pages', action='store_true', help='for the AFFiNE Snapshot export, keep the course description as the main page and add weeks as native child pages')
-    parser.add_argument('--pdf-text-blocks', action='store_true', help='extract text from local PDF files and create readable markdown text blocks under doc/pdf_text')
+    parser.add_argument('--pdf-text-blocks', action='store_true', help='extract text from local PDF files and embed readable text blocks directly in week overviews')
     parser.add_argument('--pdf-text-engine', type=str, default='auto', choices=['auto', 'pymupdf', 'tika'], help='parser engine for PDF text extraction')
     parser.add_argument('--pdf-text-max-pages', type=int, default=8, help='maximum number of PDF pages to extract per file')
     parser.add_argument('--pdf-text-max-chars', type=int, default=20000, help='maximum number of extracted characters per PDF')
+    parser.add_argument('--pdf-text-audio', dest='pdf_text_audio', action='store_true', help='generate one audio file for each longer extracted PDF text block')
+    parser.add_argument('--no-pdf-text-audio', dest='pdf_text_audio', action='store_false', help='disable audio generation for extracted PDF text blocks')
+    parser.add_argument('--pdf-text-audio-min-chars', type=int, default=300, help='minimum extracted PDF text length before creating PDF text audio')
     parser.add_argument('--pdf-text-ocr-fallback', dest='pdf_text_ocr_fallback', action='store_true', help='enable OCR fallback with Tesseract for image-based PDFs')
     parser.add_argument('--no-pdf-text-ocr-fallback', dest='pdf_text_ocr_fallback', action='store_false', help='disable OCR fallback even when PDF text blocks are enabled')
-    parser.set_defaults(pdf_text_ocr_fallback=None)
+    parser.set_defaults(pdf_text_ocr_fallback=None, pdf_text_audio=None)
     parser.add_argument('--pdf-text-ocr-lang', type=str, default='eng', help='OCR language for Tesseract, e.g. eng, deu, eng+deu')
+    parser.add_argument('--ai-week-summary', action='store_true', help='create AI summaries for each exported week page and embed them into the week markdown files')
+    parser.add_argument('--ai-summary-provider', type=str, default='openai', choices=['openai', 'gemini'], help='AI provider for weekly summaries')
+    parser.add_argument('--ai-summary-model', type=str, default='gpt-4o-mini', help='AI model name for weekly summaries (depends on provider, e.g. gpt-4o-mini or gemini-1.5-flash)')
+    parser.add_argument('--ai-summary-language', type=str, default='de', help='language code for AI summaries, e.g. de or en')
+    parser.add_argument('--ai-summary-max-chars', type=int, default=12000, help='maximum characters from each week page sent to the AI summarizer')
+    parser.add_argument('--ai-summary-base-url', type=str, default='https://api.openai.com/v1', help='provider base URL (openai: https://api.openai.com/v1, gemini: https://generativelanguage.googleapis.com/v1beta)')
+    parser.add_argument('--gemini-tts', action='store_true', help='create week audio via Gemini TTS (requires ai-summary-provider=gemini)')
+    parser.add_argument('--gemini-tts-model', type=str, default='gemini-2.5-flash-preview-tts', help='Gemini model for audio generation')
+    parser.add_argument('--gemini-tts-voice', type=str, default='Kore', help='Gemini prebuilt voice name for audio generation')
+    parser.add_argument('--gemini-tts-base-url', type=str, default='https://generativelanguage.googleapis.com/v1beta', help='Gemini API base URL for audio generation')
+    parser.add_argument('--gemini-tts-min-interval-seconds', type=float, default=5.0, help='minimum delay between Gemini TTS requests to reduce 429 rate limits')
+    parser.add_argument('--audio-only-missing', action='store_true', help='resume mode: keep existing output, skip weeks with existing audio, and generate audio only for missing weeks')
+    parser.add_argument('--elevenlabs-tts', action='store_true', help='create ElevenLabs audio from AI weekly summaries and link audio files in each week page')
+    parser.add_argument('--elevenlabs-voice-id', type=str, default='', help='ElevenLabs voice ID (falls back to ELEVENLABS_VOICE_ID env var)')
+    parser.add_argument('--elevenlabs-model-id', type=str, default='eleven_multilingual_v2', help='ElevenLabs model ID, e.g. eleven_multilingual_v2')
     parser.add_argument('--notebooklm-export', action='store_true', help='create a NotebookLM import folder with per-week subfolders and grouped files')
     parser.add_argument('--notebooklm-zip', dest='notebooklm_zip', action='store_true', help='also create notebooklm_import.zip when NotebookLM export is enabled')
     parser.add_argument('--no-notebooklm-zip', dest='notebooklm_zip', action='store_false', help='do not create notebooklm_import.zip')
@@ -2281,8 +3499,25 @@ def main():
         pdf_text_engine=args.pdf_text_engine,
         pdf_text_max_pages=args.pdf_text_max_pages,
         pdf_text_max_chars=args.pdf_text_max_chars,
+        pdf_text_audio=args.pdf_text_audio,
+        pdf_text_audio_min_chars=args.pdf_text_audio_min_chars,
         pdf_text_ocr_fallback=args.pdf_text_ocr_fallback,
         pdf_text_ocr_lang=args.pdf_text_ocr_lang,
+        ai_week_summary=args.ai_week_summary,
+        ai_summary_provider=args.ai_summary_provider,
+        ai_summary_model=args.ai_summary_model,
+        ai_summary_language=args.ai_summary_language,
+        ai_summary_max_chars=args.ai_summary_max_chars,
+        ai_summary_base_url=args.ai_summary_base_url,
+        gemini_tts=args.gemini_tts,
+        gemini_tts_model=args.gemini_tts_model,
+        gemini_tts_voice=args.gemini_tts_voice,
+        gemini_tts_base_url=args.gemini_tts_base_url,
+        gemini_tts_min_interval_seconds=args.gemini_tts_min_interval_seconds,
+        audio_only_missing=args.audio_only_missing,
+        elevenlabs_tts=args.elevenlabs_tts,
+        elevenlabs_voice_id=args.elevenlabs_voice_id,
+        elevenlabs_model_id=args.elevenlabs_model_id,
         notebooklm_export=args.notebooklm_export,
         notebooklm_zip=args.notebooklm_zip,
     )
@@ -2290,15 +3525,39 @@ def main():
     print(f"Main file: {result['main_file']}")
     print(f"Structured weeks: {'yes' if result['structured_weeks'] else 'no'}")
     print(f"Week pages: {'yes' if result['week_pages'] else 'no'}")
+    print(f"Resume from existing output: {'yes' if result.get('resume_from_existing_output') else 'no'}")
     print(f"Native week pages: {'yes' if result['native_week_pages'] else 'no'}")
     print(f"PDF text blocks: {'yes' if result['pdf_text_blocks'] else 'no'}")
     if result['pdf_text_blocks']:
         print(f"PDF text engine: {result['pdf_text_engine']}")
         print(f"PDF text max pages: {result['pdf_text_max_pages']}")
         print(f"PDF text max chars: {result['pdf_text_max_chars']}")
+        print(f"PDF text audio: {'yes' if result.get('pdf_text_audio') else 'no'}")
+        print(f"PDF text audio min chars: {result.get('pdf_text_audio_min_chars', 300)}")
         print(f"PDF text OCR fallback: {'yes' if result['pdf_text_ocr_fallback'] else 'no'}")
         if result['pdf_text_ocr_fallback']:
             print(f"PDF text OCR language: {result['pdf_text_ocr_lang']}")
+    print(f"AI week summary: {'yes' if result['ai_week_summary'] else 'no'}")
+    print(f"AI summary provider: {result['ai_summary_provider']}")
+    print(f"Gemini audio: {'yes' if result.get('gemini_tts') else 'no'}")
+    print(f"Gemini TTS min interval seconds: {result.get('gemini_tts_min_interval_seconds', 5.0)}")
+    print(f"Audio only missing: {'yes' if result.get('audio_only_missing') else 'no'}")
+    print(f"ElevenLabs audio: {'yes' if result['elevenlabs_tts'] else 'no'}")
+    ai_audio_result = result.get('ai_audio_result') or {}
+    if ai_audio_result.get('enabled'):
+        print(f"AI/audio processed weeks: {ai_audio_result.get('processed', 0)}")
+        print(f"AI summaries created: {ai_audio_result.get('summaries_created', 0)}")
+        print(f"Audio files created: {ai_audio_result.get('audio_created', 0)}")
+        print(f"Audio files skipped (already present): {ai_audio_result.get('audio_skipped_existing', 0)}")
+        if result.get('gemini_tts'):
+            print(f"Gemini TTS 429 count: {ai_audio_result.get('gemini_tts_429_count', 0)}")
+            print(f"Gemini TTS adaptive mode used: {'yes' if ai_audio_result.get('adaptive_rate_limit') else 'no'}")
+            print(f"Gemini TTS max interval seconds: {ai_audio_result.get('gemini_tts_max_interval_seconds', 0.0)}")
+            print(f"Gemini TTS final interval seconds: {ai_audio_result.get('gemini_tts_final_interval_seconds', 0.0)}")
+        if ai_audio_result.get('errors'):
+            print("AI/audio issues:")
+            for item in ai_audio_result.get('errors', []):
+                print(f"- {item}")
     print(f"NotebookLM export: {'yes' if result['notebooklm_export'] else 'no'}")
     if result['notebooklm_export']:
         print(f"NotebookLM folder: {result['notebooklm_folder'] or 'not created'}")

@@ -157,7 +157,7 @@
       font-weight: 600;
       color: #dce8ff;
     }
-    input {
+    input, select {
       width: 100%;
       padding: 12px 14px;
       border-radius: 12px;
@@ -168,7 +168,7 @@
       outline: none;
       transition: border-color 0.18s ease, box-shadow 0.18s ease;
     }
-    input:focus {
+    input:focus, select:focus {
       border-color: rgba(126, 195, 255, 0.8);
       box-shadow: 0 0 0 3px rgba(126, 195, 255, 0.22);
     }
@@ -230,6 +230,9 @@
     }
     .status.success { border-color: #2f8f72; color: #cbffef; }
     .status.error { border-color: #a94a4a; color: #ffd5d5; }
+    .status.success.gemini-green  { border-left: 4px solid #4caf50; }
+    .status.success.gemini-yellow { border-left: 4px solid #f5a623; }
+    .status.success.gemini-red    { border-left: 4px solid #e74c3c; }
     code, pre {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
@@ -240,6 +243,49 @@
       padding: 14px;
       overflow: auto;
       color: #dbe5ff;
+    }
+    .health-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin: 6px 0 10px;
+      padding: 7px 11px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+    }
+    .health-badge::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .health-badge.hidden {
+      display: none;
+    }
+    .health-badge.green {
+      color: #14532d;
+      background: rgba(134, 239, 172, 0.22);
+      border-color: rgba(34, 197, 94, 0.45);
+    }
+    .health-badge.yellow {
+      color: #713f12;
+      background: rgba(253, 224, 71, 0.26);
+      border-color: rgba(250, 204, 21, 0.52);
+    }
+    .health-badge.red {
+      color: #7f1d1d;
+      background: rgba(252, 165, 165, 0.24);
+      border-color: rgba(248, 113, 113, 0.5);
+    }
+    .health-badge.na {
+      color: #334155;
+      background: rgba(203, 213, 225, 0.26);
+      border-color: rgba(148, 163, 184, 0.5);
     }
     a { color: #a9c7ff; }
     .small { font-size: 13px; color: var(--muted); }
@@ -356,7 +402,7 @@
 
         <div class="checkbox-row">
           <input id="pdf_text_blocks" name="pdf_text_blocks" type="checkbox">
-          <label for="pdf_text_blocks">Extract local PDF files into readable Markdown text blocks under <code>doc/pdf_text</code></label>
+          <label for="pdf_text_blocks">Extract local PDF files into readable text blocks directly in week pages. With Gemini/ElevenLabs audio enabled, one audio file is also generated for longer extracted PDF text.</label>
         </div>
 
         <div class="row">
@@ -374,6 +420,27 @@
         <input id="pdf_text_max_chars" name="pdf_text_max_chars" type="number" min="500" value="20000">
 
         <div class="checkbox-row">
+          <input id="pdf_text_audio" name="pdf_text_audio" type="checkbox">
+          <label for="pdf_text_audio">Generate one audio file for longer extracted PDF text (requires Gemini or ElevenLabs audio enabled)</label>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="pdf_text_audio_preset">PDF audio preset</label>
+            <select id="pdf_text_audio_preset" name="pdf_text_audio_preset">
+              <option value="short" selected>Short (300 chars)</option>
+              <option value="medium">Medium (800 chars)</option>
+              <option value="long">Long (1500 chars)</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
+          <div>
+            <label for="pdf_text_audio_min_chars">Min chars for PDF text audio</label>
+            <input id="pdf_text_audio_min_chars" name="pdf_text_audio_min_chars" type="number" min="100" value="300">
+          </div>
+        </div>
+
+        <div class="checkbox-row">
           <input id="pdf_text_ocr_fallback" name="pdf_text_ocr_fallback" type="checkbox" checked>
           <label for="pdf_text_ocr_fallback">Enable OCR fallback (Tesseract) for scanned/image-only PDFs (default: on)</label>
         </div>
@@ -381,6 +448,87 @@
         <label for="pdf_text_ocr_lang">OCR language</label>
         <input id="pdf_text_ocr_lang" name="pdf_text_ocr_lang" value="eng" placeholder="eng | deu | eng+deu">
         <small id="pdf_text_ocr_lang_hint" style="color:#888;"></small>
+
+        <div class="checkbox-row">
+          <input id="ai_week_summary" name="ai_week_summary" type="checkbox">
+          <label for="ai_week_summary">Create AI summary for each week page and embed it into the week markdown</label>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="ai_summary_provider">AI summary provider</label>
+            <select id="ai_summary_provider" name="ai_summary_provider">
+              <option value="openai" selected>OpenAI-compatible</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </div>
+          <div>
+            <label for="ai_summary_base_url">Provider base URL</label>
+            <input id="ai_summary_base_url" name="ai_summary_base_url" value="https://api.openai.com/v1" placeholder="openai: .../v1 or gemini: .../v1beta">
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="ai_summary_model">AI summary model</label>
+            <input id="ai_summary_model" name="ai_summary_model" value="gpt-4o-mini" placeholder="gpt-4o-mini">
+          </div>
+          <div>
+            <label for="ai_summary_language">AI summary language</label>
+            <input id="ai_summary_language" name="ai_summary_language" value="de" placeholder="de | en">
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="ai_summary_max_chars">Max chars sent to AI per week</label>
+            <input id="ai_summary_max_chars" name="ai_summary_max_chars" type="number" min="1000" value="12000">
+          </div>
+          <div></div>
+        </div>
+
+        <div class="checkbox-row">
+          <input id="gemini_tts" name="gemini_tts" type="checkbox">
+          <label for="gemini_tts">Create audio via Gemini TTS (Gemini-only pipeline)</label>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="gemini_tts_model">Gemini TTS model</label>
+            <input id="gemini_tts_model" name="gemini_tts_model" value="gemini-2.5-flash-preview-tts" placeholder="gemini-2.5-flash-preview-tts">
+          </div>
+          <div>
+            <label for="gemini_tts_voice">Gemini voice</label>
+            <input id="gemini_tts_voice" name="gemini_tts_voice" value="Kore" placeholder="Kore">
+          </div>
+        </div>
+
+        <label for="gemini_tts_base_url">Gemini TTS base URL</label>
+        <input id="gemini_tts_base_url" name="gemini_tts_base_url" value="https://generativelanguage.googleapis.com/v1beta" placeholder="https://generativelanguage.googleapis.com/v1beta">
+
+        <label for="gemini_tts_min_interval_seconds">Gemini TTS min interval seconds (rate-limit control)</label>
+        <input id="gemini_tts_min_interval_seconds" name="gemini_tts_min_interval_seconds" type="number" min="0" step="0.1" value="5.0">
+
+        <div class="checkbox-row">
+          <input id="audio_only_missing" name="audio_only_missing" type="checkbox">
+          <label for="audio_only_missing">Generate audio only for missing week files (skip already existing audio links/files)</label>
+        </div>
+
+        <div class="checkbox-row">
+          <input id="elevenlabs_tts" name="elevenlabs_tts" type="checkbox">
+          <label for="elevenlabs_tts">Create ElevenLabs audio from AI summary and link it in each week page</label>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="elevenlabs_voice_id">ElevenLabs voice ID</label>
+            <input id="elevenlabs_voice_id" name="elevenlabs_voice_id" value="" placeholder="optional, else ELEVENLABS_VOICE_ID env var">
+          </div>
+          <div>
+            <label for="elevenlabs_model_id">ElevenLabs model ID</label>
+            <input id="elevenlabs_model_id" name="elevenlabs_model_id" value="eleven_multilingual_v2" placeholder="eleven_multilingual_v2">
+          </div>
+        </div>
 
         <div class="checkbox-row">
           <input id="notebooklm_export" name="notebooklm_export" type="checkbox">
@@ -419,6 +567,7 @@
         <li>Click <strong>“Start conversion”</strong>.</li>
       </ol>
       <p class="small">Example: <code>/path/to/unpacked-moodle-backup</code> → <code>/path/to/output-folder</code></p>
+      <div id="gemini-health-badge" class="health-badge hidden"></div>
       <pre id="result-box">No conversion has been run yet.</pre>
     </div>
   </div>
@@ -427,8 +576,8 @@
     const form = document.getElementById('convert-form');
     const statusBox = document.getElementById('status');
     const resultBox = document.getElementById('result-box');
-    const submitBtn = document.getElementById('submit-btn');
-    const defaultsBtn = document.getElementById('defaults-btn');
+    const geminiHealthBadge = document.getElementById('gemini-health-badge');
+    const submitBtn = document.getElementById('submit-btn');    const defaultsBtn = document.getElementById('defaults-btn');
     const sourceInput = document.getElementById('source_dir');
     const outputInput = document.getElementById('output_dir');
     const singlePageInput = document.getElementById('single_page');
@@ -439,8 +588,26 @@
     const pdfTextEngineInput = document.getElementById('pdf_text_engine');
     const pdfTextMaxPagesInput = document.getElementById('pdf_text_max_pages');
     const pdfTextMaxCharsInput = document.getElementById('pdf_text_max_chars');
+    const pdfTextAudioInput = document.getElementById('pdf_text_audio');
+    const pdfTextAudioPresetInput = document.getElementById('pdf_text_audio_preset');
+    const pdfTextAudioMinCharsInput = document.getElementById('pdf_text_audio_min_chars');
     const pdfTextOcrFallbackInput = document.getElementById('pdf_text_ocr_fallback');
     const pdfTextOcrLangInput = document.getElementById('pdf_text_ocr_lang');
+    const aiWeekSummaryInput = document.getElementById('ai_week_summary');
+    const aiSummaryProviderInput = document.getElementById('ai_summary_provider');
+    const aiSummaryModelInput = document.getElementById('ai_summary_model');
+    const aiSummaryLanguageInput = document.getElementById('ai_summary_language');
+    const aiSummaryMaxCharsInput = document.getElementById('ai_summary_max_chars');
+    const aiSummaryBaseUrlInput = document.getElementById('ai_summary_base_url');
+    const geminiTtsInput = document.getElementById('gemini_tts');
+    const geminiTtsModelInput = document.getElementById('gemini_tts_model');
+    const geminiTtsVoiceInput = document.getElementById('gemini_tts_voice');
+    const geminiTtsBaseUrlInput = document.getElementById('gemini_tts_base_url');
+    const geminiTtsMinIntervalSecondsInput = document.getElementById('gemini_tts_min_interval_seconds');
+    const audioOnlyMissingInput = document.getElementById('audio_only_missing');
+    const elevenlabsTtsInput = document.getElementById('elevenlabs_tts');
+    const elevenlabsVoiceIdInput = document.getElementById('elevenlabs_voice_id');
+    const elevenlabsModelIdInput = document.getElementById('elevenlabs_model_id');
     const notebooklmExportInput = document.getElementById('notebooklm_export');
     const notebooklmZipInput = document.getElementById('notebooklm_zip');
     const zipOutputInput = document.getElementById('zip_output');
@@ -453,6 +620,24 @@
 
     const sunIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><line x1="12" y1="2" x2="12" y2="5"></line><line x1="12" y1="19" x2="12" y2="22"></line><line x1="2" y1="12" x2="5" y2="12"></line><line x1="19" y1="12" x2="22" y2="12"></line><line x1="4.9" y1="4.9" x2="7" y2="7"></line><line x1="17" y1="17" x2="19.1" y2="19.1"></line><line x1="17" y1="7" x2="19.1" y2="4.9"></line><line x1="4.9" y1="19.1" x2="7" y2="17"></line></svg>';
     const moonIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5a8.5 8.5 0 1 1-11-11 7 7 0 1 0 11 11z"></path></svg>';
+    const AI_PROVIDER_DEFAULTS = {
+      openai: {
+        ai_summary_model: 'gpt-4o-mini',
+        ai_summary_base_url: 'https://api.openai.com/v1',
+      },
+      gemini: {
+        ai_summary_model: 'gemini-2.5-flash',
+        ai_summary_base_url: 'https://generativelanguage.googleapis.com/v1beta',
+        gemini_tts_model: 'gemini-2.5-flash-preview-tts',
+        gemini_tts_base_url: 'https://generativelanguage.googleapis.com/v1beta',
+        gemini_tts_voice: 'Kore',
+      },
+    };
+    const PDF_AUDIO_PRESETS = {
+      short: 300,
+      medium: 800,
+      long: 1500,
+    };
 
     function applyTheme(themeName) {
       const nextTheme = themeName === 'light' ? 'light' : 'dark';
@@ -500,11 +685,92 @@
       });
     });
 
+    function applyAiProviderDefaults(force = false) {
+      const provider = (aiSummaryProviderInput.value.trim() || 'openai').toLowerCase();
+      const defaults = AI_PROVIDER_DEFAULTS[provider] || AI_PROVIDER_DEFAULTS.openai;
+
+      if (force || !aiSummaryModelInput.value.trim() || Object.values(AI_PROVIDER_DEFAULTS).some((entry) => entry.ai_summary_model === aiSummaryModelInput.value.trim())) {
+        aiSummaryModelInput.value = defaults.ai_summary_model || aiSummaryModelInput.value;
+      }
+
+      if (force || !aiSummaryBaseUrlInput.value.trim() || Object.values(AI_PROVIDER_DEFAULTS).some((entry) => entry.ai_summary_base_url === aiSummaryBaseUrlInput.value.trim())) {
+        aiSummaryBaseUrlInput.value = defaults.ai_summary_base_url || aiSummaryBaseUrlInput.value;
+      }
+
+      if (provider === 'gemini') {
+        if (force || !geminiTtsModelInput.value.trim() || geminiTtsModelInput.value.trim() === AI_PROVIDER_DEFAULTS.gemini.gemini_tts_model) {
+          geminiTtsModelInput.value = defaults.gemini_tts_model || geminiTtsModelInput.value;
+        }
+        if (force || !geminiTtsBaseUrlInput.value.trim() || geminiTtsBaseUrlInput.value.trim() === AI_PROVIDER_DEFAULTS.gemini.gemini_tts_base_url) {
+          geminiTtsBaseUrlInput.value = defaults.gemini_tts_base_url || geminiTtsBaseUrlInput.value;
+        }
+        if (force || !geminiTtsVoiceInput.value.trim() || geminiTtsVoiceInput.value.trim() === AI_PROVIDER_DEFAULTS.gemini.gemini_tts_voice) {
+          geminiTtsVoiceInput.value = defaults.gemini_tts_voice || geminiTtsVoiceInput.value;
+        }
+      }
+    }
+
+    aiSummaryProviderInput.addEventListener('change', () => {
+      aiSummaryProviderInput.value = (aiSummaryProviderInput.value.trim() || 'openai').toLowerCase();
+      applyAiProviderDefaults();
+    });
+
+    function evaluateGeminiTtsHealth(data) {
+      if (!data || !data.gemini_tts) {
+        return { label: 'N/A (Gemini TTS disabled)', level: 'na' };
+      }
+      const stats = data.ai_audio_result || {};
+      const count429 = Number(stats.gemini_tts_429_count || 0);
+      const maxInterval = Number(stats.gemini_tts_max_interval_seconds || 0);
+      const baseInterval = Number(data.gemini_tts_min_interval_seconds || 5.0);
+
+      if (count429 === 0 && maxInterval <= baseInterval + 0.2) {
+        return { label: 'GREEN (stable)', level: 'green' };
+      }
+      if (count429 <= 3 && maxInterval <= 8) {
+        return { label: 'YELLOW (some throttling)', level: 'yellow' };
+      }
+      return { label: 'RED (heavy throttling / rate-limited)', level: 'red' };
+    }
+
+    function renderGeminiHealthBadge(health) {
+      if (!geminiHealthBadge) return;
+      const level = (health && health.level) ? health.level : 'na';
+      const label = (health && health.label) ? health.label : 'N/A';
+      geminiHealthBadge.textContent = `Gemini TTS health: ${label}`;
+      geminiHealthBadge.className = `health-badge ${level}`;
+    }
+
+    function syncPdfAudioPresetFromValue() {
+      const value = Number(pdfTextAudioMinCharsInput.value || 0);
+      if (value === PDF_AUDIO_PRESETS.short) {
+        pdfTextAudioPresetInput.value = 'short';
+      } else if (value === PDF_AUDIO_PRESETS.medium) {
+        pdfTextAudioPresetInput.value = 'medium';
+      } else if (value === PDF_AUDIO_PRESETS.long) {
+        pdfTextAudioPresetInput.value = 'long';
+      } else {
+        pdfTextAudioPresetInput.value = 'custom';
+      }
+    }
+
+    pdfTextAudioPresetInput.addEventListener('change', () => {
+      const selected = (pdfTextAudioPresetInput.value || 'short').toLowerCase();
+      if (selected in PDF_AUDIO_PRESETS) {
+        pdfTextAudioMinCharsInput.value = PDF_AUDIO_PRESETS[selected];
+      }
+    });
+
+    pdfTextAudioMinCharsInput.addEventListener('input', () => {
+      syncPdfAudioPresetFromValue();
+    });
+
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       submitBtn.disabled = true;
       statusBox.textContent = 'Conversion in progress…';
       statusBox.className = 'status';
+      statusBox.classList.remove('gemini-green', 'gemini-yellow', 'gemini-red');
       resultBox.textContent = 'Please wait…';
 
       try {
@@ -519,8 +785,25 @@
           pdf_text_engine: pdfTextEngineInput.value.trim() || 'auto',
           pdf_text_max_pages: Number(pdfTextMaxPagesInput.value || 8),
           pdf_text_max_chars: Number(pdfTextMaxCharsInput.value || 20000),
+          pdf_text_audio: pdfTextAudioInput.checked,
+          pdf_text_audio_min_chars: Number(pdfTextAudioMinCharsInput.value || 300),
           pdf_text_ocr_fallback: pdfTextOcrFallbackInput.checked,
           pdf_text_ocr_lang: pdfTextOcrLangInput.value.trim() || 'eng',
+          ai_week_summary: aiWeekSummaryInput.checked,
+          ai_summary_provider: (aiSummaryProviderInput.value.trim() || 'openai').toLowerCase(),
+          ai_summary_model: aiSummaryModelInput.value.trim() || 'gpt-4o-mini',
+          ai_summary_language: aiSummaryLanguageInput.value.trim() || 'de',
+          ai_summary_max_chars: Number(aiSummaryMaxCharsInput.value || 12000),
+          ai_summary_base_url: aiSummaryBaseUrlInput.value.trim() || 'https://api.openai.com/v1',
+          gemini_tts: geminiTtsInput.checked,
+          gemini_tts_model: geminiTtsModelInput.value.trim() || 'gemini-2.5-flash-preview-tts',
+          gemini_tts_voice: geminiTtsVoiceInput.value.trim() || 'Kore',
+          gemini_tts_base_url: geminiTtsBaseUrlInput.value.trim() || 'https://generativelanguage.googleapis.com/v1beta',
+          gemini_tts_min_interval_seconds: Number(geminiTtsMinIntervalSecondsInput.value || 5.0),
+          audio_only_missing: audioOnlyMissingInput.checked,
+          elevenlabs_tts: elevenlabsTtsInput.checked,
+          elevenlabs_voice_id: elevenlabsVoiceIdInput.value.trim(),
+          elevenlabs_model_id: elevenlabsModelIdInput.value.trim() || 'eleven_multilingual_v2',
           notebooklm_export: notebooklmExportInput.checked,
           notebooklm_zip: notebooklmZipInput.checked,
           zip_output: zipOutputInput.checked,
@@ -540,6 +823,12 @@
 
         statusBox.textContent = '✅ ' + data.message;
         statusBox.className = 'status success';
+        const geminiTtsHealth = evaluateGeminiTtsHealth(data);
+        renderGeminiHealthBadge(geminiTtsHealth);
+        const healthLevel = geminiTtsHealth && geminiTtsHealth.level;
+        if (healthLevel === 'green')  statusBox.classList.add('gemini-green');
+        else if (healthLevel === 'yellow') statusBox.classList.add('gemini-yellow');
+        else if (healthLevel === 'red')    statusBox.classList.add('gemini-red');
         resultBox.textContent = [
           `Source: ${data.source_dir}`,
           `Output: ${data.output_dir}`,
@@ -553,8 +842,40 @@
           `PDF text engine: ${data.pdf_text_engine || 'auto'}`,
           `PDF text max pages: ${data.pdf_text_max_pages || 8}`,
           `PDF text max chars: ${data.pdf_text_max_chars || 20000}`,
+          `PDF text audio: ${data.pdf_text_audio ? 'yes' : 'no'}`,
+          `PDF text audio min chars: ${data.pdf_text_audio_min_chars || 300}`,
           `PDF text OCR fallback: ${data.pdf_text_ocr_fallback ? 'yes' : 'no'}`,
           `PDF text OCR language: ${data.pdf_text_ocr_lang || 'eng'}`,
+          `AI week summary: ${data.ai_week_summary ? 'yes' : 'no'}`,
+          `AI summary provider: ${data.ai_summary_provider || 'openai'}`,
+          `AI summary model: ${data.ai_summary_model || 'gpt-4o-mini'}`,
+          `AI summary language: ${data.ai_summary_language || 'de'}`,
+          `AI summary max chars: ${data.ai_summary_max_chars || 12000}`,
+          `AI summary base URL: ${data.ai_summary_base_url || 'https://api.openai.com/v1'}`,
+          `Gemini audio: ${data.gemini_tts ? 'yes' : 'no'}`,
+          `Gemini TTS model: ${data.gemini_tts_model || 'gemini-2.5-flash-preview-tts'}`,
+          `Gemini TTS voice: ${data.gemini_tts_voice || 'Kore'}`,
+          `Gemini TTS base URL: ${data.gemini_tts_base_url || 'https://generativelanguage.googleapis.com/v1beta'}`,
+          `Gemini TTS min interval seconds: ${data.gemini_tts_min_interval_seconds ?? 5.0}`,
+          `Audio only missing: ${data.audio_only_missing ? 'yes' : 'no'}`,
+          `ElevenLabs audio: ${data.elevenlabs_tts ? 'yes' : 'no'}`,
+          `ElevenLabs voice ID: ${data.elevenlabs_voice_id || 'from env or not set'}`,
+          `ElevenLabs model ID: ${data.elevenlabs_model_id || 'eleven_multilingual_v2'}`,
+          `AI/audio processed weeks: ${(data.ai_audio_result && data.ai_audio_result.processed) || 0}`,
+          `AI summaries created: ${(data.ai_audio_result && data.ai_audio_result.summaries_created) || 0}`,
+          `AI summaries skipped (manifest resume): ${(data.ai_audio_result && data.ai_audio_result.summaries_skipped_manifest) || 0}`,
+          `Audio files created: ${(data.ai_audio_result && data.ai_audio_result.audio_created) || 0}`,
+          `Audio files skipped (already present): ${(data.ai_audio_result && data.ai_audio_result.audio_skipped_existing) || 0}`,
+          `Audio files skipped (manifest resume): ${(data.ai_audio_result && data.ai_audio_result.audio_skipped_manifest) || 0}`,
+          `AI jobs manifest: ${data.ai_jobs_manifest || 'not created'}`,
+          `AI jobs input dir: ${data.ai_jobs_input_dir || 'not created'}`,
+          `AI jobs output dir: ${data.ai_jobs_output_dir || 'not created'}`,
+          `Gemini TTS 429 count: ${(data.ai_audio_result && data.ai_audio_result.gemini_tts_429_count) || 0}`,
+          `Gemini TTS adaptive mode used: ${(data.ai_audio_result && data.ai_audio_result.adaptive_rate_limit) ? 'yes' : 'no'}`,
+          `Gemini TTS max interval seconds: ${(data.ai_audio_result && data.ai_audio_result.gemini_tts_max_interval_seconds) || 0}`,
+          `Gemini TTS final interval seconds: ${(data.ai_audio_result && data.ai_audio_result.gemini_tts_final_interval_seconds) || 0}`,
+          `Gemini TTS health: ${geminiTtsHealth.label}`,
+          `AI/audio errors: ${(data.ai_audio_result && data.ai_audio_result.errors && data.ai_audio_result.errors.length) ? data.ai_audio_result.errors.join(' | ') : 'none'}`,
           `NotebookLM export: ${data.notebooklm_export ? 'yes' : 'no'}`,
           `NotebookLM folder: ${data.notebooklm_folder || 'not created'}`,
           `NotebookLM ZIP: ${data.notebooklm_zip_file || 'not created'}`,
@@ -570,12 +891,18 @@
       } catch (error) {
         statusBox.textContent = '❌ ' + error.message;
         statusBox.className = 'status error';
+        if (geminiHealthBadge) {
+          geminiHealthBadge.className = 'health-badge hidden';
+          geminiHealthBadge.textContent = '';
+        }
         resultBox.textContent = 'Error: ' + error.message;
       } finally {
         submitBtn.disabled = false;
       }
     });
 
+    applyAiProviderDefaults(true);
+    syncPdfAudioPresetFromValue();
     loadDefaults().catch(() => {});
   </script>
 </body>

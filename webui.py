@@ -26,6 +26,13 @@ def parse_int(value, default, minimum):
         parsed = default
     return max(minimum, parsed)
 
+def parse_float(value, default, minimum):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, parsed)
+
 
 def normalize_error_message(message):
     text = "" if message is None else str(message).strip()
@@ -171,9 +178,29 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 pdf_text_engine = "auto"
             pdf_text_max_pages = parse_int(payload.get("pdf_text_max_pages"), default=8, minimum=1)
             pdf_text_max_chars = parse_int(payload.get("pdf_text_max_chars"), default=20000, minimum=500)
+            pdf_text_audio_raw = payload.get("pdf_text_audio")
+            pdf_text_audio = (None if pdf_text_audio_raw is None else bool(pdf_text_audio_raw))
+            pdf_text_audio_min_chars = parse_int(payload.get("pdf_text_audio_min_chars"), default=300, minimum=100)
             ocr_raw = payload.get("pdf_text_ocr_fallback")
             pdf_text_ocr_fallback = (pdf_text_blocks if ocr_raw is None else bool(ocr_raw))
             pdf_text_ocr_lang = (payload.get("pdf_text_ocr_lang") or "eng").strip() or "eng"
+            ai_week_summary = bool(payload.get("ai_week_summary"))
+            ai_summary_provider = (payload.get("ai_summary_provider") or "openai").strip().lower()
+            if ai_summary_provider not in {"openai", "gemini"}:
+                ai_summary_provider = "openai"
+            ai_summary_model = (payload.get("ai_summary_model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
+            ai_summary_language = (payload.get("ai_summary_language") or "de").strip() or "de"
+            ai_summary_max_chars = parse_int(payload.get("ai_summary_max_chars"), default=12000, minimum=1000)
+            ai_summary_base_url = (payload.get("ai_summary_base_url") or "https://api.openai.com/v1").strip() or "https://api.openai.com/v1"
+            gemini_tts = bool(payload.get("gemini_tts"))
+            gemini_tts_model = (payload.get("gemini_tts_model") or "gemini-2.5-flash-preview-tts").strip() or "gemini-2.5-flash-preview-tts"
+            gemini_tts_voice = (payload.get("gemini_tts_voice") or "Kore").strip() or "Kore"
+            gemini_tts_base_url = (payload.get("gemini_tts_base_url") or "https://generativelanguage.googleapis.com/v1beta").strip() or "https://generativelanguage.googleapis.com/v1beta"
+            gemini_tts_min_interval_seconds = parse_float(payload.get("gemini_tts_min_interval_seconds"), default=5.0, minimum=0.0)
+            audio_only_missing = bool(payload.get("audio_only_missing"))
+            elevenlabs_tts = bool(payload.get("elevenlabs_tts"))
+            elevenlabs_voice_id = (payload.get("elevenlabs_voice_id") or "").strip()
+            elevenlabs_model_id = (payload.get("elevenlabs_model_id") or "eleven_multilingual_v2").strip() or "eleven_multilingual_v2"
             notebooklm_export = bool(payload.get("notebooklm_export"))
             notebooklm_zip_raw = payload.get("notebooklm_zip")
             notebooklm_zip = (notebooklm_export if notebooklm_zip_raw is None else bool(notebooklm_zip_raw))
@@ -202,8 +229,25 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     pdf_text_engine=pdf_text_engine,
                     pdf_text_max_pages=pdf_text_max_pages,
                     pdf_text_max_chars=pdf_text_max_chars,
+                    pdf_text_audio=pdf_text_audio,
+                    pdf_text_audio_min_chars=pdf_text_audio_min_chars,
                     pdf_text_ocr_fallback=pdf_text_ocr_fallback,
                     pdf_text_ocr_lang=pdf_text_ocr_lang,
+                    ai_week_summary=ai_week_summary,
+                    ai_summary_provider=ai_summary_provider,
+                    ai_summary_model=ai_summary_model,
+                    ai_summary_language=ai_summary_language,
+                    ai_summary_max_chars=ai_summary_max_chars,
+                    ai_summary_base_url=ai_summary_base_url,
+                    gemini_tts=gemini_tts,
+                    gemini_tts_model=gemini_tts_model,
+                    gemini_tts_voice=gemini_tts_voice,
+                    gemini_tts_base_url=gemini_tts_base_url,
+                    gemini_tts_min_interval_seconds=gemini_tts_min_interval_seconds,
+                    audio_only_missing=audio_only_missing,
+                    elevenlabs_tts=elevenlabs_tts,
+                    elevenlabs_voice_id=elevenlabs_voice_id,
+                    elevenlabs_model_id=elevenlabs_model_id,
                     notebooklm_export=notebooklm_export,
                     notebooklm_zip=notebooklm_zip,
                 )
@@ -223,8 +267,29 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "pdf_text_engine": result_data["pdf_text_engine"],
                 "pdf_text_max_pages": result_data["pdf_text_max_pages"],
                 "pdf_text_max_chars": result_data["pdf_text_max_chars"],
+                "pdf_text_audio": result_data.get("pdf_text_audio", False),
+                "pdf_text_audio_min_chars": result_data.get("pdf_text_audio_min_chars", 300),
                 "pdf_text_ocr_fallback": result_data["pdf_text_ocr_fallback"],
                 "pdf_text_ocr_lang": result_data["pdf_text_ocr_lang"],
+                "ai_week_summary": result_data.get("ai_week_summary", False),
+                "ai_summary_provider": result_data.get("ai_summary_provider", "openai"),
+                "ai_summary_model": result_data.get("ai_summary_model", "gpt-4o-mini"),
+                "ai_summary_language": result_data.get("ai_summary_language", "de"),
+                "ai_summary_max_chars": result_data.get("ai_summary_max_chars", 12000),
+                "ai_summary_base_url": result_data.get("ai_summary_base_url", "https://api.openai.com/v1"),
+                "gemini_tts": result_data.get("gemini_tts", False),
+                "gemini_tts_model": result_data.get("gemini_tts_model", "gemini-2.5-flash-preview-tts"),
+                "gemini_tts_voice": result_data.get("gemini_tts_voice", "Kore"),
+                "gemini_tts_base_url": result_data.get("gemini_tts_base_url", "https://generativelanguage.googleapis.com/v1beta"),
+                "gemini_tts_min_interval_seconds": result_data.get("gemini_tts_min_interval_seconds", 5.0),
+                "audio_only_missing": result_data.get("audio_only_missing", False),
+                "elevenlabs_tts": result_data.get("elevenlabs_tts", False),
+                "elevenlabs_voice_id": result_data.get("elevenlabs_voice_id", ""),
+                "elevenlabs_model_id": result_data.get("elevenlabs_model_id", "eleven_multilingual_v2"),
+                "ai_audio_result": result_data.get("ai_audio_result") or {},
+                "ai_jobs_manifest": result_data.get("ai_jobs_manifest"),
+                "ai_jobs_input_dir": result_data.get("ai_jobs_input_dir"),
+                "ai_jobs_output_dir": result_data.get("ai_jobs_output_dir"),
                 "notebooklm_export": result_data["notebooklm_export"],
                 "notebooklm_zip": result_data["notebooklm_zip"],
                 "notebooklm_folder": result_data["notebooklm_folder"],
