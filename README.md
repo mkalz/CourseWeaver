@@ -2,6 +2,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/mkalz/CourseWeaver/ci.yml?branch=main&label=CI)](https://github.com/mkalz/CourseWeaver/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-16a34a.svg)](LICENSE)
 
 ![CourseWeaver logo](webui/courseweaver-logo-dark.svg)
 
