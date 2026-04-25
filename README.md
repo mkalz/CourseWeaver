@@ -3,6 +3,8 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/mkalz/CourseWeaver/ci.yml?branch=main&label=CI)](https://github.com/mkalz/CourseWeaver/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
+![CourseWeaver logo](webui/courseweaver-logo-dark.svg)
+
 CourseWeaver converts unpacked Moodle course backups into structured knowledge bundles for Markdown, AFFiNE, and NotebookLM workflows.
 
 It is the successor to Moodle2Affine and extends the original converter with a local Web UI, structured week exports, AFFiNE ZIP and Snapshot output, PDF text extraction with OCR fallback, and NotebookLM-ready folder bundles.

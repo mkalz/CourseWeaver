@@ -1,0 +1,21 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="CourseWeaver icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#12356A"/>
+      <stop offset="100%" stop-color="#0C2145"/>
+    </linearGradient>
+    <linearGradient id="a" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8FD5FF"/>
+      <stop offset="100%" stop-color="#57B1FF"/>
+    </linearGradient>
+    <linearGradient id="b" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7FF0D1"/>
+      <stop offset="100%" stop-color="#40CFAE"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="url(#bg)"/>
+  <path d="M14 21L32 13L50 21L32 29L14 21Z" fill="none" stroke="url(#a)" stroke-width="3"/>
+  <path d="M14 31L32 39L50 31" fill="none" stroke="url(#a)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M14 41L32 49L50 41" fill="none" stroke="url(#b)" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="32" cy="29" r="2.7" fill="#A9DEFF"/>
+</svg>
