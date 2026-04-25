@@ -1,6 +1,6 @@
 # CourseWeaver
 
-[![CI](https://github.com/mkalz/CourseWeaver/actions/workflows/ci.yml/badge.svg)](https://github.com/mkalz/CourseWeaver/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/mkalz/CourseWeaver/ci.yml?branch=main&label=CI)](https://github.com/mkalz/CourseWeaver/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
 CourseWeaver converts unpacked Moodle course backups into structured knowledge bundles for Markdown, AFFiNE, and NotebookLM workflows.
