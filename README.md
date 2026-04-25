@@ -10,6 +10,8 @@ CourseWeaver converts unpacked Moodle course backups into structured knowledge b
 
 It is the successor to Moodle2Affine and extends the original converter with a local Web UI, structured week exports, AFFiNE ZIP and Snapshot output, PDF text extraction with OCR fallback, and NotebookLM-ready folder bundles.
 
+The current release also includes an end-to-end AI pipeline for weekly summaries and audio generation (Gemini TTS or ElevenLabs), including resume mode and job-level tracking.
+
 1. Download a Moodle course as archive (.mbz)
 2. Rename the file from .mbz to .zip.
 3. Unpack the zip file.
@@ -41,6 +43,48 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output --single-page --zip --html --structured-weeks --week-pages --native-week-pages --pdf-text-blocks
 ```
+
+## 🤖 AI Quickstart (5 minutes)
+
+Use this section if you only want AI summaries + audio quickly.
+
+1. Activate your virtual environment and install dependencies.
+2. Set provider API keys in your shell.
+3. Run one of the tested commands below.
+
+### Option A: Gemini summary + Gemini TTS audio
+
+```bash
+export GEMINI_API_KEY="your_key_here"
+
+python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output \
+  --week-pages --ai-week-summary \
+  --ai-summary-provider gemini --ai-summary-model gemini-2.5-flash \
+  --gemini-tts --gemini-tts-model gemini-2.5-flash-preview-tts \
+  --gemini-tts-voice Kore --gemini-tts-min-interval-seconds 5.0
+```
+
+### Option B: OpenAI-compatible summary + ElevenLabs audio
+
+```bash
+export OPENAI_API_KEY="your_key_here"
+export ELEVENLABS_API_KEY="your_key_here"
+export ELEVENLABS_VOICE_ID="your_voice_id"
+
+python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output \
+  --week-pages --ai-week-summary \
+  --ai-summary-provider openai --ai-summary-model gpt-4o-mini \
+  --elevenlabs-tts --elevenlabs-model-id eleven_multilingual_v2
+```
+
+### Resume only missing audio files
+
+```bash
+python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output \
+  --audio-only-missing --ai-summary-provider gemini --gemini-tts
+```
+
+This resume mode reuses existing output and only processes missing audio jobs where possible.
 
 ## 🔧 CLI usage
 
@@ -96,11 +140,11 @@ Use `--native-week-pages` if the native AFFiNE Snapshot export should keep the c
 
 This option is designed to work alongside `--zip`, and it can be combined with `--structured-weeks` and `--week-pages`.
 
-### Optional PDF to text blocks
+### Optional PDF text extraction (with optional PDF text audio)
 
-Use `--pdf-text-blocks` if local PDF resources should be parsed into readable Markdown text blocks.
+Use `--pdf-text-blocks` if local PDF resources should be parsed and embedded as readable text directly inside week pages.
 
-The converter keeps the original PDF attachment and additionally creates linked text pages in `doc/pdf_text/`.
+The original PDF file link is preserved, and extracted text is added inline when parsing succeeds.
 
 Available parser options:
 
@@ -108,7 +152,7 @@ Available parser options:
 - `--pdf-text-engine pymupdf`
 - `--pdf-text-engine tika` (requires `tika` package and Java runtime)
 
-Extraction limits can be tuned per file:
+Extraction limits:
 
 - `--pdf-text-max-pages 8`
 - `--pdf-text-max-chars 20000`
@@ -116,18 +160,127 @@ Extraction limits can be tuned per file:
 Optional OCR fallback for scanned/image-based PDFs:
 
 - `--pdf-text-ocr-fallback` (enabled by default when `--pdf-text-blocks` is used)
-- `--no-pdf-text-ocr-fallback` (explicitly disable OCR fallback)
+- `--no-pdf-text-ocr-fallback`
 - `--pdf-text-ocr-lang eng` (examples: `deu`, `eng+deu`)
 
 OCR requires the system binary `tesseract` to be installed and available in `PATH`.
 
-In the Web UI, the default OCR language is inferred from your system locale (for example `deu+eng` on German systems) and can still be edited manually.
+Optional PDF text audio:
+
+- `--pdf-text-audio` / `--no-pdf-text-audio`
+- `--pdf-text-audio-min-chars 300` (minimum extracted text length before creating audio)
 
 Example:
 
 ```bash
-python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output --zip --pdf-text-blocks --pdf-text-engine auto --pdf-text-max-pages 10 --pdf-text-max-chars 30000 --pdf-text-ocr-fallback --pdf-text-ocr-lang eng+deu
+python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output \
+  --week-pages --pdf-text-blocks --pdf-text-engine auto \
+  --pdf-text-max-pages 10 --pdf-text-max-chars 30000 \
+  --pdf-text-ocr-fallback --pdf-text-ocr-lang eng+deu \
+  --pdf-text-audio --pdf-text-audio-min-chars 300
 ```
+
+### AI summaries and audio production
+
+CourseWeaver supports AI-generated weekly summaries and audio output with a two-phase pipeline:
+
+1. Phase 1: Generate all weekly summaries.
+2. Phase 2: Generate audio from the generated summaries.
+
+This design prevents partial runs where audio failures stop summary generation too early.
+
+#### Providers
+
+- Summary providers:
+  - OpenAI-compatible (`--ai-summary-provider openai`)
+  - Gemini (`--ai-summary-provider gemini`)
+- Audio providers:
+  - Gemini TTS (`--gemini-tts`)
+  - ElevenLabs (`--elevenlabs-tts`)
+
+Gemini TTS requires Gemini as summary provider.
+
+#### Required environment variables
+
+- For OpenAI-compatible summaries:
+  - `OPENAI_API_KEY`
+- For Gemini summaries/TTS:
+  - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
+- For ElevenLabs audio:
+  - `ELEVENLABS_API_KEY`
+  - `ELEVENLABS_VOICE_ID` (or pass `--elevenlabs-voice-id`)
+
+#### Main AI/Audio CLI flags
+
+- Summary:
+  - `--ai-week-summary`
+  - `--ai-summary-provider openai|gemini`
+  - `--ai-summary-model ...`
+  - `--ai-summary-language de|en|...`
+  - `--ai-summary-max-chars 12000`
+  - `--ai-summary-base-url ...`
+- Gemini audio:
+  - `--gemini-tts`
+  - `--gemini-tts-model gemini-2.5-flash-preview-tts`
+  - `--gemini-tts-voice Kore`
+  - `--gemini-tts-base-url https://generativelanguage.googleapis.com/v1beta`
+  - `--gemini-tts-min-interval-seconds 5.0`
+- ElevenLabs audio:
+  - `--elevenlabs-tts`
+  - `--elevenlabs-voice-id ...`
+  - `--elevenlabs-model-id eleven_multilingual_v2`
+- Resume mode:
+  - `--audio-only-missing`
+
+#### Job artifacts and resume
+
+AI processing writes job-level artifacts to `files/ai_jobs/`:
+
+- `files/ai_jobs/input/` contains markdown inputs for summary/audio jobs.
+- `files/ai_jobs/output/` contains generated summary/audio metadata markdown files.
+- `files/ai_jobs/manifest.jsonl` tracks job states (`queued`, `done`, `reused`, `skipped`, `error`).
+
+With `--audio-only-missing`, CourseWeaver resumes from existing output and uses manifest state to skip already completed jobs when possible.
+
+#### End-to-end examples
+
+Gemini-only summary + audio:
+
+```bash
+python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output \
+  --week-pages --ai-week-summary \
+  --ai-summary-provider gemini --ai-summary-model gemini-2.5-flash \
+  --gemini-tts --gemini-tts-model gemini-2.5-flash-preview-tts \
+  --gemini-tts-voice Kore --gemini-tts-min-interval-seconds 5.0
+```
+
+OpenAI summary + ElevenLabs audio:
+
+```bash
+python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output \
+  --week-pages --ai-week-summary \
+  --ai-summary-provider openai --ai-summary-model gpt-4o-mini \
+  --elevenlabs-tts --elevenlabs-model-id eleven_multilingual_v2
+```
+
+Resume missing audio only:
+
+```bash
+python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output \
+  --audio-only-missing --ai-summary-provider gemini --gemini-tts
+```
+
+#### Troubleshooting (AI/Audio)
+
+- Many 429/rate-limit events:
+  - Increase `--gemini-tts-min-interval-seconds` (for example to `6.0` or `8.0`).
+  - Re-run with `--audio-only-missing`.
+- OCR fallback not working:
+  - Install system `tesseract` and ensure it is in `PATH`.
+- Gemini audio cannot be decoded by players:
+  - Current pipeline wraps PCM responses into WAV automatically.
+- Missing audio for short PDF extracts:
+  - Lower `--pdf-text-audio-min-chars`.
 
 ### NotebookLM import bundle
 
@@ -175,8 +328,8 @@ README.md
 ALL_IN_ONE.md
 AFFINE_IMPORT.html
 doc/
-doc/pdf_text/
 files/
+files/ai_jobs/
 img/
 <output_name>_affine.zip
 <output_name>_affine_native.zip
