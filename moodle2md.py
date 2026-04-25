@@ -124,6 +124,7 @@ RUNTIME_OPTIONS = {
     "gemini_tts_voice": "Kore",
     "gemini_tts_base_url": "https://generativelanguage.googleapis.com/v1beta",
     "gemini_tts_min_interval_seconds": 5.0,
+    "gemini_summary_min_interval_seconds": 3.0,
     "elevenlabs_model_id": "eleven_multilingual_v2",
     "elevenlabs_voice_id": "",
     "ai_jobs_resume_done": False,
@@ -131,10 +132,14 @@ RUNTIME_OPTIONS = {
 
 PDF_TEXT_CACHE = {}
 LAST_GEMINI_TTS_REQUEST_TS = 0.0
+LAST_GEMINI_SUMMARY_REQUEST_TS = 0.0
 ADAPTIVE_RATE_STATE = {
     "gemini_tts_interval": None,
     "gemini_tts_max_interval": 0.0,
     "gemini_tts_429_count": 0,
+    "gemini_summary_interval": None,
+    "gemini_summary_max_interval": 0.0,
+    "gemini_summary_429_count": 0,
 }
 AI_JOB_STATUS_CACHE = {}
 
@@ -152,6 +157,9 @@ def reset_adaptive_rate_state():
     ADAPTIVE_RATE_STATE["gemini_tts_interval"] = None
     ADAPTIVE_RATE_STATE["gemini_tts_max_interval"] = 0.0
     ADAPTIVE_RATE_STATE["gemini_tts_429_count"] = 0
+    ADAPTIVE_RATE_STATE["gemini_summary_interval"] = None
+    ADAPTIVE_RATE_STATE["gemini_summary_max_interval"] = 0.0
+    ADAPTIVE_RATE_STATE["gemini_summary_429_count"] = 0
 
 
 def reset_ai_job_status_cache():
@@ -162,9 +170,21 @@ def base_gemini_tts_interval_seconds():
     return max(0.0, float(runtime_option("gemini_tts_min_interval_seconds", 5.0) or 0.0))
 
 
+def base_gemini_summary_interval_seconds():
+    return max(0.0, float(runtime_option("gemini_summary_min_interval_seconds", 3.0) or 0.0))
+
+
 def current_gemini_tts_interval_seconds():
     base_interval = base_gemini_tts_interval_seconds()
     adaptive_interval = ADAPTIVE_RATE_STATE.get("gemini_tts_interval")
+    if adaptive_interval is None:
+        return base_interval
+    return max(base_interval, float(adaptive_interval))
+
+
+def current_gemini_summary_interval_seconds():
+    base_interval = base_gemini_summary_interval_seconds()
+    adaptive_interval = ADAPTIVE_RATE_STATE.get("gemini_summary_interval")
     if adaptive_interval is None:
         return base_interval
     return max(base_interval, float(adaptive_interval))
@@ -193,6 +213,31 @@ def on_gemini_tts_success():
         ADAPTIVE_RATE_STATE["gemini_tts_interval"] = None
     else:
         ADAPTIVE_RATE_STATE["gemini_tts_interval"] = lowered_interval
+
+
+def on_gemini_summary_retry(exc, _attempt, _max_attempts):
+    if not isinstance(exc, HTTPError) or int(exc.code) != 429:
+        return None
+    ADAPTIVE_RATE_STATE["gemini_summary_429_count"] = int(ADAPTIVE_RATE_STATE.get("gemini_summary_429_count") or 0) + 1
+    base_interval = base_gemini_summary_interval_seconds()
+    current_interval = current_gemini_summary_interval_seconds()
+    increased_interval = min(60.0, max(base_interval, current_interval * 2.2 if current_interval > 0 else base_interval))
+    ADAPTIVE_RATE_STATE["gemini_summary_interval"] = increased_interval
+    ADAPTIVE_RATE_STATE["gemini_summary_max_interval"] = max(float(ADAPTIVE_RATE_STATE.get("gemini_summary_max_interval") or 0.0), increased_interval)
+    print(f"[throttle] Gemini summary interval increased to {increased_interval:.1f}s due to 429")
+    return increased_interval
+
+
+def on_gemini_summary_success():
+    current_interval = ADAPTIVE_RATE_STATE.get("gemini_summary_interval")
+    if current_interval is None:
+        return
+    base_interval = base_gemini_summary_interval_seconds()
+    lowered_interval = max(base_interval, float(current_interval) * 0.95)
+    if lowered_interval <= base_interval + 0.1:
+        ADAPTIVE_RATE_STATE["gemini_summary_interval"] = None
+    else:
+        ADAPTIVE_RATE_STATE["gemini_summary_interval"] = lowered_interval
 
 
 def resolve_local_output_path(output_dir, target):
@@ -1719,6 +1764,7 @@ def request_openai_week_summary(source_text, api_key, model, language="de", max_
 
 
 def request_gemini_week_summary(source_text, api_key, model, language="de", max_output_tokens=None, base_url="https://generativelanguage.googleapis.com/v1beta"):
+    wait_for_gemini_summary_slot()
     prompt_language = (language or "de").strip()
     resolved_max_output_tokens = int(max_output_tokens) if max_output_tokens is not None else 2048
     prompt_text = (
@@ -1928,6 +1974,21 @@ def wait_for_gemini_tts_slot(min_interval_seconds):
     if elapsed < interval:
         time.sleep(interval - elapsed)
     LAST_GEMINI_TTS_REQUEST_TS = time.time()
+
+
+def wait_for_gemini_summary_slot():
+    global LAST_GEMINI_SUMMARY_REQUEST_TS
+    interval = current_gemini_summary_interval_seconds()
+    if interval <= 0:
+        LAST_GEMINI_SUMMARY_REQUEST_TS = time.time()
+        return
+    now = time.time()
+    elapsed = now - float(LAST_GEMINI_SUMMARY_REQUEST_TS or 0.0)
+    if elapsed < interval:
+        wait = interval - elapsed
+        print(f"[throttle] Gemini summary: waiting {wait:.1f}s before next request")
+        time.sleep(wait)
+    LAST_GEMINI_SUMMARY_REQUEST_TS = time.time()
 
 
 def call_with_retries(action, label="request", max_attempts=3, base_delay_seconds=1.0, on_retry=None, on_success=None):
@@ -2159,6 +2220,8 @@ def enrich_week_pages_with_ai_summary_and_audio(
                 else:
                     if not plain_text:
                         raise RuntimeError("Week page has no text content for summary generation")
+                    _on_retry = on_gemini_summary_retry if provider == "gemini" else None
+                    _on_success = on_gemini_summary_success if provider == "gemini" else None
                     summary_text = call_with_retries(
                         lambda: request_ai_week_summary(
                             plain_text,
@@ -2169,8 +2232,10 @@ def enrich_week_pages_with_ai_summary_and_audio(
                             base_url=ai_summary_base_url,
                         ),
                         label=f"week summary {relative_path}",
-                        max_attempts=3,
-                        base_delay_seconds=1.0,
+                        max_attempts=4,
+                        base_delay_seconds=3.0,
+                        on_retry=_on_retry,
+                        on_success=_on_success,
                     )
                     result["summaries_created"] += 1
                     append_ai_job_manifest(output_dir, {
@@ -3261,6 +3326,7 @@ def convert_course(
     gemini_tts_voice="Kore",
     gemini_tts_base_url="https://generativelanguage.googleapis.com/v1beta",
     gemini_tts_min_interval_seconds=5.0,
+    gemini_summary_min_interval_seconds=3.0,
     audio_only_missing=False,
     elevenlabs_tts=False,
     elevenlabs_voice_id="",
@@ -3299,6 +3365,7 @@ def convert_course(
         gemini_tts_voice=str(gemini_tts_voice or "Kore").strip() or "Kore",
         gemini_tts_base_url=str(gemini_tts_base_url or "https://generativelanguage.googleapis.com/v1beta").strip() or "https://generativelanguage.googleapis.com/v1beta",
         gemini_tts_min_interval_seconds=max(0.0, float(gemini_tts_min_interval_seconds or 0.0)),
+        gemini_summary_min_interval_seconds=max(0.0, float(gemini_summary_min_interval_seconds or 0.0)),
         elevenlabs_model_id=str(elevenlabs_model_id or "eleven_multilingual_v2").strip() or "eleven_multilingual_v2",
         elevenlabs_voice_id=str(elevenlabs_voice_id or "").strip(),
         ai_jobs_resume_done=bool(audio_only_missing),
@@ -3428,6 +3495,7 @@ def convert_course(
         "gemini_tts_voice": str(gemini_tts_voice or "Kore").strip() or "Kore",
         "gemini_tts_base_url": str(gemini_tts_base_url or "https://generativelanguage.googleapis.com/v1beta").strip() or "https://generativelanguage.googleapis.com/v1beta",
         "gemini_tts_min_interval_seconds": max(0.0, float(gemini_tts_min_interval_seconds or 0.0)),
+        "gemini_summary_min_interval_seconds": max(0.0, float(gemini_summary_min_interval_seconds or 0.0)),
         "audio_only_missing": bool(audio_only_missing),
         "elevenlabs_tts": bool(elevenlabs_tts),
         "elevenlabs_voice_id": str(elevenlabs_voice_id or "").strip(),
@@ -3477,6 +3545,7 @@ def main():
     parser.add_argument('--gemini-tts-voice', type=str, default='Kore', help='Gemini prebuilt voice name for audio generation')
     parser.add_argument('--gemini-tts-base-url', type=str, default='https://generativelanguage.googleapis.com/v1beta', help='Gemini API base URL for audio generation')
     parser.add_argument('--gemini-tts-min-interval-seconds', type=float, default=5.0, help='minimum delay between Gemini TTS requests to reduce 429 rate limits')
+    parser.add_argument('--gemini-summary-min-interval-seconds', type=float, default=3.0, help='minimum delay between Gemini summary requests to reduce 429 rate limits')
     parser.add_argument('--audio-only-missing', action='store_true', help='resume mode: keep existing output, skip weeks with existing audio, and generate audio only for missing weeks')
     parser.add_argument('--elevenlabs-tts', action='store_true', help='create ElevenLabs audio from AI weekly summaries and link audio files in each week page')
     parser.add_argument('--elevenlabs-voice-id', type=str, default='', help='ElevenLabs voice ID (falls back to ELEVENLABS_VOICE_ID env var)')
@@ -3514,6 +3583,7 @@ def main():
         gemini_tts_voice=args.gemini_tts_voice,
         gemini_tts_base_url=args.gemini_tts_base_url,
         gemini_tts_min_interval_seconds=args.gemini_tts_min_interval_seconds,
+        gemini_summary_min_interval_seconds=args.gemini_summary_min_interval_seconds,
         audio_only_missing=args.audio_only_missing,
         elevenlabs_tts=args.elevenlabs_tts,
         elevenlabs_voice_id=args.elevenlabs_voice_id,
@@ -3541,6 +3611,7 @@ def main():
     print(f"AI summary provider: {result['ai_summary_provider']}")
     print(f"Gemini audio: {'yes' if result.get('gemini_tts') else 'no'}")
     print(f"Gemini TTS min interval seconds: {result.get('gemini_tts_min_interval_seconds', 5.0)}")
+    print(f"Gemini summary min interval seconds: {result.get('gemini_summary_min_interval_seconds', 3.0)}")
     print(f"Audio only missing: {'yes' if result.get('audio_only_missing') else 'no'}")
     print(f"ElevenLabs audio: {'yes' if result['elevenlabs_tts'] else 'no'}")
     ai_audio_result = result.get('ai_audio_result') or {}

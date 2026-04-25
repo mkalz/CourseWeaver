@@ -509,6 +509,9 @@
         <label for="gemini_tts_min_interval_seconds">Gemini TTS min interval seconds (rate-limit control)</label>
         <input id="gemini_tts_min_interval_seconds" name="gemini_tts_min_interval_seconds" type="number" min="0" step="0.1" value="5.0">
 
+        <label for="gemini_summary_min_interval_seconds">Gemini summary min interval seconds (rate-limit control)</label>
+        <input id="gemini_summary_min_interval_seconds" name="gemini_summary_min_interval_seconds" type="number" min="0" step="0.1" value="3.0">
+
         <div class="checkbox-row">
           <input id="audio_only_missing" name="audio_only_missing" type="checkbox">
           <label for="audio_only_missing">Generate audio only for missing week files (skip already existing audio links/files)</label>
@@ -604,6 +607,7 @@
     const geminiTtsVoiceInput = document.getElementById('gemini_tts_voice');
     const geminiTtsBaseUrlInput = document.getElementById('gemini_tts_base_url');
     const geminiTtsMinIntervalSecondsInput = document.getElementById('gemini_tts_min_interval_seconds');
+    const geminiSummaryMinIntervalSecondsInput = document.getElementById('gemini_summary_min_interval_seconds');
     const audioOnlyMissingInput = document.getElementById('audio_only_missing');
     const elevenlabsTtsInput = document.getElementById('elevenlabs_tts');
     const elevenlabsVoiceIdInput = document.getElementById('elevenlabs_voice_id');
@@ -626,11 +630,12 @@
         ai_summary_base_url: 'https://api.openai.com/v1',
       },
       gemini: {
-        ai_summary_model: 'gemini-2.5-flash',
+        ai_summary_model: 'gemini-1.5-flash',
         ai_summary_base_url: 'https://generativelanguage.googleapis.com/v1beta',
         gemini_tts_model: 'gemini-2.5-flash-preview-tts',
         gemini_tts_base_url: 'https://generativelanguage.googleapis.com/v1beta',
         gemini_tts_voice: 'Kore',
+        gemini_summary_min_interval_seconds: 3.0,
       },
     };
     const PDF_AUDIO_PRESETS = {
@@ -706,6 +711,9 @@
         }
         if (force || !geminiTtsVoiceInput.value.trim() || geminiTtsVoiceInput.value.trim() === AI_PROVIDER_DEFAULTS.gemini.gemini_tts_voice) {
           geminiTtsVoiceInput.value = defaults.gemini_tts_voice || geminiTtsVoiceInput.value;
+        }
+        if (geminiSummaryMinIntervalSecondsInput && (force || !geminiSummaryMinIntervalSecondsInput.value.trim())) {
+          geminiSummaryMinIntervalSecondsInput.value = defaults.gemini_summary_min_interval_seconds ?? geminiSummaryMinIntervalSecondsInput.value;
         }
       }
     }

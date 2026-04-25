@@ -19,6 +19,26 @@ DEFAULT_SOURCE = str(Path.home() / "Downloads" / "efmd26")
 DEFAULT_OUTPUT = str(Path.home() / "Downloads" / "efmd26_markdown")
 
 
+class TeeStream:
+    def __init__(self, *streams):
+        self.streams = [stream for stream in streams if stream is not None]
+
+    def write(self, data):
+        for stream in self.streams:
+            try:
+                stream.write(data)
+            except Exception:
+                pass
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
+
 def parse_int(value, default, minimum):
     try:
         parsed = int(value)
@@ -197,6 +217,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             gemini_tts_voice = (payload.get("gemini_tts_voice") or "Kore").strip() or "Kore"
             gemini_tts_base_url = (payload.get("gemini_tts_base_url") or "https://generativelanguage.googleapis.com/v1beta").strip() or "https://generativelanguage.googleapis.com/v1beta"
             gemini_tts_min_interval_seconds = parse_float(payload.get("gemini_tts_min_interval_seconds"), default=5.0, minimum=0.0)
+            gemini_summary_min_interval_seconds = parse_float(payload.get("gemini_summary_min_interval_seconds"), default=3.0, minimum=0.0)
             audio_only_missing = bool(payload.get("audio_only_missing"))
             elevenlabs_tts = bool(payload.get("elevenlabs_tts"))
             elevenlabs_voice_id = (payload.get("elevenlabs_voice_id") or "").strip()
@@ -215,7 +236,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             from moodle2md import convert_course
 
             buffer = io.StringIO()
-            with redirect_stdout(buffer), redirect_stderr(buffer):
+            tee_stdout = TeeStream(buffer, sys.__stdout__)
+            tee_stderr = TeeStream(buffer, sys.__stderr__)
+            with redirect_stdout(tee_stdout), redirect_stderr(tee_stderr):
                 result_data = convert_course(
                     source_dir,
                     output_dir or None,
@@ -244,6 +267,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     gemini_tts_voice=gemini_tts_voice,
                     gemini_tts_base_url=gemini_tts_base_url,
                     gemini_tts_min_interval_seconds=gemini_tts_min_interval_seconds,
+                    gemini_summary_min_interval_seconds=gemini_summary_min_interval_seconds,
                     audio_only_missing=audio_only_missing,
                     elevenlabs_tts=elevenlabs_tts,
                     elevenlabs_voice_id=elevenlabs_voice_id,
@@ -282,6 +306,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "gemini_tts_voice": result_data.get("gemini_tts_voice", "Kore"),
                 "gemini_tts_base_url": result_data.get("gemini_tts_base_url", "https://generativelanguage.googleapis.com/v1beta"),
                 "gemini_tts_min_interval_seconds": result_data.get("gemini_tts_min_interval_seconds", 5.0),
+                "gemini_summary_min_interval_seconds": result_data.get("gemini_summary_min_interval_seconds", 3.0),
                 "audio_only_missing": result_data.get("audio_only_missing", False),
                 "elevenlabs_tts": result_data.get("elevenlabs_tts", False),
                 "elevenlabs_voice_id": result_data.get("elevenlabs_voice_id", ""),
