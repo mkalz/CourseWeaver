@@ -621,6 +621,12 @@
     const themeLabelEl = document.getElementById('theme-label');
     const brandLogoEl = document.getElementById('brand-logo');
     const appFaviconEl = document.getElementById('app-favicon');
+    const keyAvailability = {
+      has_openai_api_key: false,
+      has_gemini_api_key: false,
+      has_elevenlabs_api_key: false,
+      has_elevenlabs_voice_id: false,
+    };
 
     const sunIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><line x1="12" y1="2" x2="12" y2="5"></line><line x1="12" y1="19" x2="12" y2="22"></line><line x1="2" y1="12" x2="5" y2="12"></line><line x1="19" y1="12" x2="22" y2="12"></line><line x1="4.9" y1="4.9" x2="7" y2="7"></line><line x1="17" y1="17" x2="19.1" y2="19.1"></line><line x1="17" y1="7" x2="19.1" y2="4.9"></line><line x1="4.9" y1="19.1" x2="7" y2="17"></line></svg>';
     const moonIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5a8.5 8.5 0 1 1-11-11 7 7 0 1 0 11 11z"></path></svg>';
@@ -681,6 +687,41 @@
       if (typeof data.pdf_text_ocr_fallback === 'boolean') {
         pdfTextOcrFallbackInput.checked = data.pdf_text_ocr_fallback;
       }
+      keyAvailability.has_openai_api_key = Boolean(data.has_openai_api_key);
+      keyAvailability.has_gemini_api_key = Boolean(data.has_gemini_api_key);
+      keyAvailability.has_elevenlabs_api_key = Boolean(data.has_elevenlabs_api_key);
+      keyAvailability.has_elevenlabs_voice_id = Boolean(data.has_elevenlabs_voice_id);
+    }
+
+    function preflightValidationErrors(payload) {
+      const errors = [];
+      const provider = (payload.ai_summary_provider || 'openai').toLowerCase();
+      const needsSummary = Boolean(payload.ai_week_summary || payload.gemini_tts || payload.elevenlabs_tts);
+
+      if (needsSummary) {
+        if (provider === 'gemini' && !keyAvailability.has_gemini_api_key) {
+          errors.push('Summary provider is Gemini, but GEMINI_API_KEY/GOOGLE_API_KEY is not set.');
+        }
+        if (provider === 'openai' && !keyAvailability.has_openai_api_key && !keyAvailability.has_gemini_api_key) {
+          errors.push('OPENAI_API_KEY is missing and no Gemini key is available as summary fallback.');
+        }
+      }
+
+      if (payload.gemini_tts && !keyAvailability.has_gemini_api_key) {
+        errors.push('Gemini audio is enabled, but GEMINI_API_KEY/GOOGLE_API_KEY is not set.');
+      }
+
+      if (payload.elevenlabs_tts) {
+        if (!keyAvailability.has_elevenlabs_api_key) {
+          errors.push('ElevenLabs audio is enabled, but ELEVENLABS_API_KEY is not set.');
+        }
+        const hasVoiceInPayload = Boolean((payload.elevenlabs_voice_id || '').trim());
+        if (!hasVoiceInPayload && !keyAvailability.has_elevenlabs_voice_id) {
+          errors.push('ElevenLabs audio needs a voice ID (set ELEVENLABS_VOICE_ID or fill the voice ID field).');
+        }
+      }
+
+      return errors;
     }
 
     defaultsBtn.addEventListener('click', () => {
@@ -817,6 +858,11 @@
           zip_output: zipOutputInput.checked,
           html_output: htmlOutputInput.checked,
         };
+
+        const preflightErrors = preflightValidationErrors(payload);
+        if (preflightErrors.length) {
+          throw new Error(preflightErrors.join(' '));
+        }
 
         const response = await fetch('/convert', {
           method: 'POST',

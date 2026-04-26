@@ -168,6 +168,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "output_dir": DEFAULT_OUTPUT,
                 "pdf_text_ocr_lang": detect_default_ocr_lang(),
                 "pdf_text_ocr_fallback": True,
+                "has_openai_api_key": bool((os.environ.get("OPENAI_API_KEY") or "").strip()),
+                "has_gemini_api_key": bool((os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()),
+                "has_elevenlabs_api_key": bool((os.environ.get("ELEVENLABS_API_KEY") or "").strip()),
+                "has_elevenlabs_voice_id": bool((os.environ.get("ELEVENLABS_VOICE_ID") or "").strip()),
             })
             return
 
