@@ -18,6 +18,18 @@ UI_DIR = ROOT / "webui"
 DEFAULT_SOURCE = str(Path.home() / "Downloads" / "efmd26")
 DEFAULT_OUTPUT = str(Path.home() / "Downloads" / "efmd26_markdown")
 
+# Load .env from project root (does not overwrite already-set env vars)
+_dotenv_path = ROOT / ".env"
+if _dotenv_path.is_file():
+    with _dotenv_path.open() as _dotenv_fh:
+        for _line in _dotenv_fh:
+            _line = _line.strip()
+            if not _line or _line.startswith("#"):
+                continue
+            if "=" in _line and _line.split("=", 1)[0].replace("_", "").isalnum():
+                _key, _val = _line.split("=", 1)
+                os.environ.setdefault(_key.strip(), _val.strip().strip('"').strip("'"))
+
 
 class TeeStream:
     def __init__(self, *streams):

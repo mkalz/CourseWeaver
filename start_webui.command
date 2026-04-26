@@ -12,6 +12,22 @@ load_shell_environment() {
 	done
 }
 
+load_dotenv() {
+	local dotenv_file="$(dirname "$0")/.env"
+	if [[ ! -f "$dotenv_file" ]]; then
+		return 0
+	fi
+	echo "Loading environment from .env ..."
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		# Skip blank lines and comments
+		[[ -z "$line" || "$line" == \#* ]] && continue
+		# Only process KEY=VALUE lines
+		if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+			export "$line"
+		fi
+	done < "$dotenv_file"
+}
+
 bootstrap_venv() {
 	if [[ ! -x "$BOOTSTRAP_PY" ]]; then
 		echo "Native Homebrew Python not found at $BOOTSTRAP_PY"
@@ -33,6 +49,7 @@ if [[ ! -x ./.venv/bin/python ]]; then
 fi
 
 load_shell_environment
+load_dotenv
 
 HOST_ARCH="$(/usr/bin/uname -m 2>/dev/null || echo unknown)"
 PY_ARCH_LINE="$(/usr/bin/file ./.venv/bin/python 2>/dev/null || true)"

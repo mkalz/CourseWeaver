@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# API keys / secrets
+.env
+
 # local export folders
 course/
 *_markdown/
