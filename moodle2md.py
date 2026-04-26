@@ -1844,6 +1844,42 @@ def request_ai_week_summary(source_text, api_provider, api_key, model, language=
     )
 
 
+def build_local_week_summary_fallback(source_text, language="de"):
+    text = re.sub(r"\s+", " ", (source_text or "").strip())
+    if not text:
+        if (language or "de").strip().lower().startswith("de"):
+            return "Kurzfassung: Zu dieser Woche wurde kein auswertbarer Text gefunden."
+        return "Short summary: No analyzable text was found for this week."
+
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+    if not sentences:
+        sentences = [text]
+
+    intro_de = "Die wichtigsten Inhalte dieser Woche in kurzer Form:"
+    outro_de = "Hinweis: Diese Zusammenfassung wurde lokal als Fallback erzeugt."
+    intro_en = "Key points of this week in short form:"
+    outro_en = "Note: This summary was generated locally as a fallback."
+    is_de = (language or "de").strip().lower().startswith("de")
+    intro = intro_de if is_de else intro_en
+    outro = outro_de if is_de else outro_en
+
+    bullet_candidates = []
+    for sentence in sentences:
+        cleaned = sentence.strip(" -\t\n\r")
+        if len(cleaned) < 24:
+            continue
+        bullet_candidates.append(cleaned[:220].rstrip())
+        if len(bullet_candidates) >= 5:
+            break
+
+    if not bullet_candidates:
+        fallback_line = text[:220].rstrip()
+        bullet_candidates = [fallback_line] if fallback_line else ["Inhalt konnte nur teilweise gelesen werden."]
+
+    body = "\n".join(f"- {line}" for line in bullet_candidates)
+    return f"{intro}\n\n{body}\n\n{outro}"
+
+
 def request_elevenlabs_tts(text, api_key, voice_id, model_id="eleven_multilingual_v2"):
     payload = {
         "text": text,
@@ -2214,8 +2250,7 @@ def enrich_week_pages_with_ai_summary_and_audio(
         return result
 
     if gemini_tts and provider != "gemini":
-        result["errors"].append("Gemini TTS requires --ai-summary-provider gemini.")
-        return result
+        result["errors"].append("Gemini TTS is enabled while summary provider is not gemini; continuing anyway using GEMINI_API_KEY for audio.")
 
     if gemini_tts and not gemini_tts_key:
         result["errors"].append("GEMINI_API_KEY or GOOGLE_API_KEY is required for Gemini audio generation.")
@@ -2286,30 +2321,56 @@ def enrich_week_pages_with_ai_summary_and_audio(
                         raise RuntimeError("Week page has no text content for summary generation")
                     _on_retry = on_gemini_summary_retry if provider == "gemini" else None
                     _on_success = on_gemini_summary_success if provider == "gemini" else None
-                    summary_text = call_with_retries(
-                        lambda: request_ai_week_summary(
-                            plain_text,
-                            api_provider=provider,
-                            api_key=ai_api_key,
-                            model=(ai_summary_model or "gpt-4o-mini"),
-                            language=ai_summary_language,
-                            base_url=ai_summary_base_url,
-                        ),
-                        label=f"week summary {relative_path}",
-                        max_attempts=4,
-                        base_delay_seconds=3.0,
-                        on_retry=_on_retry,
-                        on_success=_on_success,
-                    )
-                    result["summaries_created"] += 1
-                    append_ai_job_manifest(output_dir, {
-                        "job_type": "week_summary",
-                        "job_id": summary_job_id,
-                        "status": "done",
-                        "provider": provider,
-                        "week_relative_path": relative_path,
-                        "input_markdown": summary_input_markdown,
-                    })
+                    try:
+                        summary_text = call_with_retries(
+                            lambda: request_ai_week_summary(
+                                plain_text,
+                                api_provider=provider,
+                                api_key=ai_api_key,
+                                model=(ai_summary_model or "gpt-4o-mini"),
+                                language=ai_summary_language,
+                                base_url=ai_summary_base_url,
+                            ),
+                            label=f"week summary {relative_path}",
+                            max_attempts=4,
+                            base_delay_seconds=3.0,
+                            on_retry=_on_retry,
+                            on_success=_on_success,
+                        )
+                        result["summaries_created"] += 1
+                        append_ai_job_manifest(output_dir, {
+                            "job_type": "week_summary",
+                            "job_id": summary_job_id,
+                            "status": "done",
+                            "provider": provider,
+                            "week_relative_path": relative_path,
+                            "input_markdown": summary_input_markdown,
+                        })
+                    except Exception as summary_exc:
+                        if existing_summary:
+                            summary_text = existing_summary
+                            append_ai_job_manifest(output_dir, {
+                                "job_type": "week_summary",
+                                "job_id": summary_job_id,
+                                "status": "reused",
+                                "reason": "summary API failed, reused existing summary",
+                                "provider": provider,
+                                "week_relative_path": relative_path,
+                                "input_markdown": summary_input_markdown,
+                            })
+                            result["errors"].append(f"{relative_path}: summary API failed, reused existing summary ({summary_exc})")
+                        else:
+                            summary_text = build_local_week_summary_fallback(plain_text, ai_summary_language)
+                            append_ai_job_manifest(output_dir, {
+                                "job_type": "week_summary",
+                                "job_id": summary_job_id,
+                                "status": "fallback",
+                                "reason": "summary API failed, generated local fallback summary",
+                                "provider": provider,
+                                "week_relative_path": relative_path,
+                                "input_markdown": summary_input_markdown,
+                            })
+                            result["errors"].append(f"{relative_path}: summary API failed, generated local fallback summary ({summary_exc})")
             elif summary_text:
                 append_ai_job_manifest(output_dir, {
                     "job_type": "week_summary",
