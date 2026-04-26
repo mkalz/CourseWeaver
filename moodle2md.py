@@ -124,6 +124,7 @@ RUNTIME_OPTIONS = {
     "gemini_tts_voice": "Kore",
     "gemini_tts_base_url": "https://generativelanguage.googleapis.com/v1beta",
     "gemini_tts_min_interval_seconds": 5.0,
+    "gemini_tts_max_chars": 4500,
     "gemini_summary_min_interval_seconds": 3.0,
     "elevenlabs_model_id": "eleven_multilingual_v2",
     "elevenlabs_voice_id": "",
@@ -1880,64 +1881,127 @@ def wrap_pcm_as_wav(audio_bytes, sample_rate=24000, channels=1, sample_width=2):
     return buffer.getvalue()
 
 
+def prepare_text_for_gemini_tts(text, max_chars=4500):
+    content = "" if text is None else str(text)
+    if not content.strip():
+        return "", False
+
+    # Keep the spoken variant clean and predictable for the Gemini TTS endpoint.
+    content = unescape(content)
+    content = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", content)
+    content = re.sub(r"`{1,3}([^`]+)`{1,3}", r"\1", content)
+    content = re.sub(r"^\s{0,3}#{1,6}\s+", "", content, flags=re.MULTILINE)
+    content = re.sub(r"^[\-+*]\s+", "", content, flags=re.MULTILINE)
+    content = re.sub(r"\s+", " ", content)
+    content = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", content)
+    content = content.strip()
+
+    limit = max(300, int(max_chars or 4500))
+    if len(content) <= limit:
+        return content, False
+
+    threshold = int(limit * 0.65)
+    cut = max(
+        content.rfind(". ", 0, limit),
+        content.rfind("! ", 0, limit),
+        content.rfind("? ", 0, limit),
+    )
+    if cut < threshold:
+        cut = content.rfind(" ", 0, limit)
+    if cut < threshold:
+        cut = limit
+    return f"{content[:cut].strip()} ...", True
+
+
 def request_gemini_tts(text, api_key, model="gemini-2.5-flash-preview-tts", voice_name="Kore", base_url="https://generativelanguage.googleapis.com/v1beta"):
     wait_for_gemini_tts_slot(runtime_option("gemini_tts_min_interval_seconds", 5.0))
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": text,
-                    }
-                ],
-            }
-        ],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {
-                        "voiceName": (voice_name or "Kore").strip() or "Kore",
-                    }
-                }
-            },
-        },
-    }
-    request = Request(
-        build_gemini_generate_url(base_url, model, api_key),
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    with urlopen(request, timeout=120) as response:
-        raw = response.read().decode("utf-8")
+    max_chars = int(runtime_option("gemini_tts_max_chars", 4500) or 4500)
+    prepared_text, was_truncated = prepare_text_for_gemini_tts(text, max_chars=max_chars)
+    if not prepared_text:
+        raise RuntimeError("Gemini TTS input text is empty after normalization")
+    if was_truncated:
+        print(f"[tts] Gemini input truncated to {len(prepared_text)} chars (limit={max_chars})")
 
-    data = json.loads(raw)
-    candidates = data.get("candidates") or []
-    if not candidates:
-        raise RuntimeError("Gemini TTS API returned no candidates")
-    parts = ((candidates[0].get("content") or {}).get("parts") or [])
-    for part in parts:
-        inline = part.get("inlineData") or {}
-        b64_audio = (inline.get("data") or "").strip()
-        if not b64_audio:
-            continue
-        mime_type = (inline.get("mimeType") or "audio/wav").strip() or "audio/wav"
+    def send_tts_request(spoken_text):
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": spoken_text,
+                        }
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {
+                            "voiceName": (voice_name or "Kore").strip() or "Kore",
+                        }
+                    }
+                },
+            },
+        }
+        request = Request(
+            build_gemini_generate_url(base_url, model, api_key),
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
         try:
-            audio_bytes = base64.b64decode(b64_audio)
-        except Exception as exc:
-            raise RuntimeError(f"Gemini TTS audio decode failed: {exc}")
-        if audio_bytes:
-            if mime_type.lower().startswith("audio/l16"):
-                rate_match = re.search(r"rate=(\d+)", mime_type, flags=re.IGNORECASE)
-                sample_rate = int(rate_match.group(1)) if rate_match else 24000
-                audio_bytes = wrap_pcm_as_wav(audio_bytes, sample_rate=sample_rate, channels=1, sample_width=2)
-                mime_type = "audio/wav"
-            return audio_bytes, mime_type
-    raise RuntimeError("Gemini TTS API returned no audio payload")
+            with urlopen(request, timeout=120) as response:
+                raw = response.read().decode("utf-8")
+        except HTTPError as exc:
+            details = ""
+            try:
+                details = (exc.read() or b"").decode("utf-8", errors="replace").strip()
+            except Exception:
+                details = ""
+            if details:
+                print(f"[tts] Gemini TTS HTTP {exc.code}: {details[:500]}")
+            raise
+
+        data = json.loads(raw)
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise RuntimeError("Gemini TTS API returned no candidates")
+        parts = ((candidates[0].get("content") or {}).get("parts") or [])
+        for part in parts:
+            inline = part.get("inlineData") or {}
+            b64_audio = (inline.get("data") or "").strip()
+            if not b64_audio:
+                continue
+            mime_type = (inline.get("mimeType") or "audio/wav").strip() or "audio/wav"
+            try:
+                audio_bytes = base64.b64decode(b64_audio)
+            except Exception as exc:
+                raise RuntimeError(f"Gemini TTS audio decode failed: {exc}")
+            if audio_bytes:
+                if mime_type.lower().startswith("audio/l16"):
+                    rate_match = re.search(r"rate=(\d+)", mime_type, flags=re.IGNORECASE)
+                    sample_rate = int(rate_match.group(1)) if rate_match else 24000
+                    audio_bytes = wrap_pcm_as_wav(audio_bytes, sample_rate=sample_rate, channels=1, sample_width=2)
+                    mime_type = "audio/wav"
+                return audio_bytes, mime_type
+        raise RuntimeError("Gemini TTS API returned no audio payload")
+
+    try:
+        return send_tts_request(prepared_text)
+    except HTTPError as exc:
+        if int(exc.code) != 400:
+            raise
+        fallback_limit = min(max_chars, 1800)
+        fallback_text, fallback_truncated = prepare_text_for_gemini_tts(prepared_text, max_chars=fallback_limit)
+        if not fallback_truncated or len(fallback_text) >= len(prepared_text):
+            raise
+        print(f"[tts] Gemini returned HTTP 400. Retrying once with shorter text ({len(prepared_text)} -> {len(fallback_text)} chars).")
+        return send_tts_request(fallback_text)
 
 
 def is_retryable_api_error(exc):
