@@ -2271,21 +2271,29 @@ def enrich_week_pages_with_ai_summary_and_audio(
         return result
 
     provider = (ai_summary_provider or "openai").strip().lower()
-    ai_api_key = ""
-    if provider == "gemini":
-        ai_api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
-    else:
-        ai_api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    openai_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    gemini_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+    ai_api_key = gemini_key if provider == "gemini" else openai_key
+    summary_api_available = bool(ai_api_key)
     elevenlabs_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
     resolved_voice_id = (elevenlabs_voice_id or os.environ.get("ELEVENLABS_VOICE_ID") or "").strip()
-    gemini_tts_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+    gemini_tts_key = gemini_key
 
-    if effective_ai_summary and not ai_api_key:
-        if provider == "gemini":
-            result["errors"].append("GEMINI_API_KEY or GOOGLE_API_KEY is required for AI week summaries with provider 'gemini'.")
+    if effective_ai_summary and not summary_api_available:
+        if provider == "openai" and gemini_key:
+            provider = "gemini"
+            ai_api_key = gemini_key
+            summary_api_available = True
+            if (ai_summary_model or "").strip() in {"", "gpt-4o-mini"}:
+                ai_summary_model = "gemini-1.5-flash"
+            if (ai_summary_base_url or "").strip() in {"", "https://api.openai.com/v1"}:
+                ai_summary_base_url = "https://generativelanguage.googleapis.com/v1beta"
+            result["errors"].append("OPENAI_API_KEY missing; switched AI summary provider to Gemini automatically.")
         else:
-            result["errors"].append("OPENAI_API_KEY is required for AI week summaries with provider 'openai'.")
-        return result
+            if provider == "gemini":
+                result["errors"].append("GEMINI_API_KEY missing for AI summaries; using local fallback summaries.")
+            else:
+                result["errors"].append("OPENAI_API_KEY missing for AI summaries; using local fallback summaries.")
 
     if elevenlabs_tts and not elevenlabs_key:
         result["errors"].append("ELEVENLABS_API_KEY is required for audio generation.")
@@ -2365,9 +2373,11 @@ def enrich_week_pages_with_ai_summary_and_audio(
                 else:
                     if not plain_text:
                         raise RuntimeError("Week page has no text content for summary generation")
-                    _on_retry = on_gemini_summary_retry if provider == "gemini" else None
-                    _on_success = on_gemini_summary_success if provider == "gemini" else None
+                    _on_retry = on_gemini_summary_retry if provider == "gemini" and summary_api_available else None
+                    _on_success = on_gemini_summary_success if provider == "gemini" and summary_api_available else None
                     try:
+                        if not summary_api_available:
+                            raise RuntimeError("summary API key unavailable")
                         summary_text = call_with_retries(
                             lambda: request_ai_week_summary(
                                 plain_text,
