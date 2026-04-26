@@ -10,6 +10,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from app.api.routes import audio, health, jobs
 from app.core.config import get_settings
@@ -44,7 +45,7 @@ async def lifespan(app: FastAPI):
     await processor.resume_pending_and_orphaned()
     _processor_task = asyncio.create_task(processor.run_forever(), name="job-processor")
     logger.info(
-        "CourseWeaver API started  —  TTS=%s  provider=%s  device=%s",
+        "CourseBeaver API started  —  TTS=%s  provider=%s  device=%s",
         settings.tts_engine,
         settings.ai_summary_provider,
         settings.effective_gpu_device(),
@@ -59,13 +60,13 @@ async def lifespan(app: FastAPI):
             await _processor_task
         except asyncio.CancelledError:
             pass
-    logger.info("CourseWeaver API shut down")
+    logger.info("CourseBeaver API shut down")
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="CourseWeaver",
+        title="CourseBeaver",
         summary="Accessibility-optimised narrated audio from Moodle course content",
         version="2.0.0",
         lifespan=lifespan,
@@ -83,6 +84,10 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(audio.router)
 
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse(url="/docs")
+
     return app
 
 
@@ -91,7 +96,7 @@ app = create_app()
 
 def main() -> None:
     import argparse
-    parser = argparse.ArgumentParser(description="CourseWeaver API server")
+    parser = argparse.ArgumentParser(description="CourseBeaver API server")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--reload", action="store_true")

@@ -1,13 +1,13 @@
 services:
 
-  # ── CourseWeaver API ────────────────────────────────────────────────────────
-  courseweaver:
+  # ── CourseBeaver API ────────────────────────────────────────────────────────
+  coursebeaver:
     build:
       context: .
       args:
         BASE: python:3.12-slim   # swap to nvidia/cuda:… for GPU
-    image: courseweaver:latest
-    container_name: courseweaver
+    image: coursebeaver:latest
+    container_name: coursebeaver
     restart: unless-stopped
     ports:
       - "8766:8766"

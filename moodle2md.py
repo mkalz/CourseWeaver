@@ -129,6 +129,12 @@ RUNTIME_OPTIONS = {
     "elevenlabs_model_id": "eleven_multilingual_v2",
     "elevenlabs_voice_id": "",
     "ai_jobs_resume_done": False,
+    # --- Local pipeline (Ollama + XTTS/Kokoro) ---
+    "local_chunk_size": 8000,       # max chars per chunk sent to local LLM
+    "local_tts_engine": "kokoro",   # "kokoro" | "xtts"
+    "local_tts_voice": "af_heart",  # Kokoro voice name or XTTS speaker wav path
+    "local_tts_language": "en-us",  # language code for local TTS
+    "chapterized_mp3": False,       # combine all week audios into one MP3 with chapters
 }
 
 PDF_TEXT_CACHE = {}
@@ -1864,6 +1870,14 @@ def request_gemini_week_summary(source_text, api_key, model, language="de", max_
 
 def request_ai_week_summary(source_text, api_provider, api_key, model, language="de", max_output_tokens=None, base_url=""):
     provider = (api_provider or "openai").strip().lower()
+    if provider == "local":
+        return request_local_week_summary(
+            source_text,
+            model=model or "qwen2.5:14b",
+            language=language,
+            base_url=base_url or "http://localhost:11434/v1",
+            chunk_size=int(runtime_option("local_chunk_size", 8000) or 8000),
+        )
     if provider == "gemini":
         return request_gemini_week_summary(
             source_text,
@@ -2082,7 +2096,316 @@ def request_gemini_tts(text, api_key, model="gemini-2.5-flash-preview-tts", voic
         return send_tts_request(fallback_text)
 
 
-def is_retryable_api_error(exc):
+# ---------------------------------------------------------------------------
+# Local pipeline helpers (Ollama / Qwen · XTTS v2 / Kokoro · chapterized MP3)
+# ---------------------------------------------------------------------------
+
+def chunk_text_for_local_llm(text, max_chars=8000):
+    """Split *text* into chunks of at most *max_chars* characters, breaking at
+    paragraph / sentence boundaries where possible."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+    chunks = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_chars:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n\n", 0, max_chars)
+        if cut == -1:
+            cut = remaining.rfind("\n", 0, max_chars)
+        if cut == -1:
+            cut = remaining.rfind(". ", 0, max_chars)
+        if cut == -1:
+            cut = max_chars
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    return [c for c in chunks if c]
+
+
+_PEDAGOGICAL_SYSTEM_PROMPT = (
+    "You are an expert educational content designer specialising in adult learning and instructional design. "
+    "Your task is to create pedagogically rich summaries of weekly university course content. "
+    "A good summary: (1) opens with the central learning objective of the week in one sentence, "
+    "(2) lists 4-6 key concepts or skills students should acquire as bullet points, "
+    "(3) highlights connections to prior or upcoming topics where evident, "
+    "(4) closes with a short motivating sentence about why this content matters. "
+    "Write clearly and concisely so the summary is pleasant to listen to as spoken audio. "
+    "Avoid markdown links, raw file names, and formatting marks that do not translate well to speech."
+)
+
+_PEDAGOGICAL_CHUNK_SYSTEM_PROMPT = (
+    "You are an expert educational content assistant. Extract the key learning points from this excerpt "
+    "of weekly course material. Return a concise bullet-point list (4-8 bullets). "
+    "Focus on concepts, skills, and facts — not administrative details or file names."
+)
+
+_PEDAGOGICAL_SYNTHESIS_SYSTEM_PROMPT = (
+    "You are an expert educational content designer. Below are partial summaries of excerpts from the "
+    "same weekly course unit. Synthesise them into a single, cohesive pedagogical summary. "
+    "Structure: 1 sentence stating the central learning objective, 4-6 bullet points covering key concepts "
+    "and skills, 1 sentence on relevance or connection to the broader course. "
+    "Write for speech output — no markdown links, no raw file names."
+)
+
+
+def _call_ollama_chat(messages, model, base_url, max_tokens=600, temperature=0.3):
+    """Low-level call to an Ollama / OpenAI-compatible chat completions endpoint.
+    No API key is required for local Ollama; a placeholder is sent."""
+    payload = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": int(max_tokens),
+        "messages": messages,
+    }
+    url = base_url.rstrip("/") + "/chat/completions"
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer ollama",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=300) as response:
+        raw = response.read().decode("utf-8")
+    data = json.loads(raw)
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("Local LLM returned no choices")
+    content = ((choices[0].get("message") or {}).get("content") or "").strip()
+    if not content:
+        raise RuntimeError("Local LLM returned empty content")
+    return content
+
+
+def request_local_week_summary(source_text, model="qwen2.5:14b", language="de",
+                                base_url="http://localhost:11434/v1", chunk_size=8000):
+    """Generate a pedagogical summary via a local Ollama model.
+    For long content the text is first chunked, each chunk is summarised
+    individually, and the partial summaries are then synthesised in a
+    final pass."""
+    prompt_lang = (language or "de").strip()
+    lang_instruction = f"Respond in language '{prompt_lang}'."
+
+    chunks = chunk_text_for_local_llm(source_text, max_chars=max(2000, int(chunk_size or 8000)))
+
+    if len(chunks) <= 1:
+        # Single-pass: text fits in context window.
+        single_text = chunks[0] if chunks else (source_text or "").strip()
+        messages = [
+            {"role": "system", "content": f"{_PEDAGOGICAL_SYSTEM_PROMPT} {lang_instruction}"},
+            {
+                "role": "user",
+                "content": (
+                    f"Length: about 140-220 words total.\n"
+                    f"Course content:\n{single_text}"
+                ),
+            },
+        ]
+        return _call_ollama_chat(messages, model=model, base_url=base_url, max_tokens=600)
+
+    # Multi-pass: summarise each chunk, then synthesise.
+    print(f"[local_llm] Chunking: {len(chunks)} chunks for local summarisation")
+    chunk_summaries = []
+    for idx, chunk in enumerate(chunks, start=1):
+        print(f"[local_llm] Summarising chunk {idx}/{len(chunks)} ({len(chunk)} chars)")
+        messages = [
+            {"role": "system", "content": f"{_PEDAGOGICAL_CHUNK_SYSTEM_PROMPT} {lang_instruction}"},
+            {"role": "user", "content": f"Excerpt:\n{chunk}"},
+        ]
+        chunk_summary = _call_ollama_chat(messages, model=model, base_url=base_url, max_tokens=300)
+        chunk_summaries.append(chunk_summary)
+
+    combined = "\n\n---\n\n".join(chunk_summaries)
+    print(f"[local_llm] Synthesising {len(chunk_summaries)} chunk summaries")
+    messages = [
+        {"role": "system", "content": f"{_PEDAGOGICAL_SYNTHESIS_SYSTEM_PROMPT} {lang_instruction}"},
+        {
+            "role": "user",
+            "content": (
+                f"Length: about 140-220 words total.\n"
+                f"Partial summaries:\n{combined}"
+            ),
+        },
+    ]
+    return _call_ollama_chat(messages, model=model, base_url=base_url, max_tokens=600)
+
+
+def request_kokoro_tts(text, voice="af_heart", language="en-us"):
+    """Synthesise speech with Kokoro (kokoro-onnx). Returns WAV bytes.
+    Requires: pip install kokoro-onnx soundfile numpy"""
+    try:
+        import numpy as np
+        import soundfile as sf
+        from kokoro_onnx import Kokoro
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Kokoro TTS requires 'kokoro-onnx', 'soundfile', and 'numpy': pip install kokoro-onnx soundfile numpy. ({exc})"
+        )
+    kokoro = Kokoro("kokoro-v1.0.onnx", "voices.bin")
+    samples, sample_rate = kokoro.create(
+        text,
+        voice=(voice or "af_heart"),
+        speed=1.0,
+        lang=(language or "en-us"),
+    )
+    buf = io.BytesIO()
+    sf.write(buf, samples, sample_rate, format="WAV")
+    return buf.getvalue()
+
+
+def request_xtts_tts(text, speaker="", language="de"):
+    """Synthesise speech with Coqui XTTS v2. Returns WAV bytes.
+    Requires: pip install TTS"""
+    try:
+        import numpy as np
+        from TTS.api import TTS as CoquiTTS
+    except ImportError as exc:
+        raise RuntimeError(
+            f"XTTS v2 requires the 'TTS' package: pip install TTS. ({exc})"
+        )
+    model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
+    tts_engine = CoquiTTS(model_name)
+    speaker_wav = (speaker or "").strip() or None
+    wav_list = tts_engine.tts(
+        text=text,
+        speaker_wav=speaker_wav,
+        language=(language or "de"),
+    )
+    import array as _array
+    wav_array = _array.array("h", [int(max(-32768, min(32767, s * 32767))) for s in wav_list])
+    sample_rate = 24000
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(wav_array.tobytes())
+    return buf.getvalue()
+
+
+def request_local_tts(text, engine="kokoro", voice="af_heart", language="en-us"):
+    """Dispatch to the configured local TTS engine. Returns WAV bytes."""
+    engine_lower = (engine or "kokoro").strip().lower()
+    if engine_lower == "xtts":
+        return request_xtts_tts(text, speaker=(voice or ""), language=(language or "de"))
+    return request_kokoro_tts(text, voice=(voice or "af_heart"), language=(language or "en-us"))
+
+
+def build_chapterized_mp3(audio_dir, chapter_tasks, output_path):
+    """Concatenate per-week audio files into a single MP3 with ID3-style
+    chapter markers embedded via ffmpeg metadata.
+
+    *chapter_tasks*: list of dicts with keys 'title' and 'audio_path' (Path objects).
+    Returns the path to the created MP3 or None on failure."""
+    if not chapter_tasks:
+        return None
+
+    # Verify ffmpeg is available.
+    try:
+        subprocess.run(
+            ["ffmpeg", "-version"],
+            check=True, capture_output=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        print("[chapterized_mp3] ffmpeg not found; skipping chapterized MP3 generation")
+        return None
+
+    audio_dir = Path(audio_dir)
+    output_mp3 = Path(output_path)
+    output_mp3.parent.mkdir(parents=True, exist_ok=True)
+
+    concat_list = audio_dir / "_chapter_concat.txt"
+    ffmeta_file = audio_dir / "_chapter_meta.txt"
+
+    # Build concat list.
+    with concat_list.open("w", encoding="utf-8") as f:
+        for task in chapter_tasks:
+            safe = str(task["audio_path"]).replace("'", r"'\''")
+            f.write(f"file '{safe}'\n")
+
+    # Determine chapter durations via ffprobe.
+    cumulative_ms = 0
+    chapter_entries = []
+    for task in chapter_tasks:
+        ap = Path(task["audio_path"])
+        duration_ms = 0
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_streams", str(ap),
+                ],
+                capture_output=True, text=True, check=True,
+            )
+            probe_data = json.loads(probe.stdout)
+            for stream in probe_data.get("streams", []):
+                dur_str = stream.get("duration") or ""
+                if dur_str:
+                    duration_ms = int(float(dur_str) * 1000)
+                    break
+        except Exception as exc:
+            print(f"[chapterized_mp3] Could not probe duration of {ap.name}: {exc}")
+        chapter_entries.append({
+            "title": task["title"],
+            "start_ms": cumulative_ms,
+            "end_ms": cumulative_ms + max(duration_ms, 1),
+        })
+        cumulative_ms += max(duration_ms, 1)
+
+    # Write ffmetadata.
+    with ffmeta_file.open("w", encoding="utf-8") as f:
+        f.write(";FFMETADATA1\n")
+        for entry in chapter_entries:
+            title_escaped = str(entry["title"]).replace("=", r"\=").replace(";", r"\;").replace("#", r"\#").replace("\\", "\\\\")
+            f.write(f"\n[CHAPTER]\nTIMEBASE=1/1000\nSTART={entry['start_ms']}\nEND={entry['end_ms']}\ntitle={title_escaped}\n")
+
+    tmp_concat = audio_dir / "_chapter_concat_raw.mp3"
+    try:
+        # Pass 1: concatenate.
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-c:a", "libmp3lame", "-q:a", "4",
+                str(tmp_concat),
+            ],
+            check=True, capture_output=True,
+        )
+        # Pass 2: embed chapter metadata.
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(tmp_concat),
+                "-i", str(ffmeta_file),
+                "-map_metadata", "1",
+                "-codec", "copy",
+                str(output_mp3),
+            ],
+            check=True, capture_output=True,
+        )
+        print(f"[chapterized_mp3] Created: {output_mp3}")
+        return str(output_mp3)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode("utf-8", errors="replace")[-500:]
+        print(f"[chapterized_mp3] ffmpeg failed: {stderr}")
+        return None
+    finally:
+        for tmp in (concat_list, ffmeta_file, tmp_concat):
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+
     if isinstance(exc, DailyQuotaExceededError):
         return False
     if isinstance(exc, HTTPError):
@@ -2245,8 +2568,13 @@ def enrich_week_pages_with_ai_summary_and_audio(
     elevenlabs_voice_id="",
     elevenlabs_model_id="eleven_multilingual_v2",
     audio_only_missing=False,
+    local_tts=False,
+    local_tts_engine="kokoro",
+    local_tts_voice="af_heart",
+    local_tts_language="en-us",
+    chapterized_mp3=False,
 ):
-    effective_audio = bool(gemini_tts or elevenlabs_tts)
+    effective_audio = bool(gemini_tts or elevenlabs_tts or local_tts)
     effective_ai_summary = bool(ai_week_summary or effective_audio)
     result = {
         "enabled": bool(ai_week_summary or effective_audio),
@@ -2256,11 +2584,12 @@ def enrich_week_pages_with_ai_summary_and_audio(
         "audio_created": 0,
         "audio_skipped_existing": 0,
         "audio_skipped_manifest": 0,
-        "audio_provider": "gemini" if gemini_tts else ("elevenlabs" if elevenlabs_tts else "none"),
+        "audio_provider": "gemini" if gemini_tts else ("elevenlabs" if elevenlabs_tts else ("local" if local_tts else "none")),
         "adaptive_rate_limit": False,
         "gemini_tts_429_count": 0,
         "gemini_tts_max_interval_seconds": 0.0,
         "gemini_tts_final_interval_seconds": 0.0,
+        "chapterized_mp3_file": None,
         "errors": [],
     }
     if not result["enabled"]:

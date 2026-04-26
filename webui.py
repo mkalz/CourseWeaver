@@ -7,16 +7,21 @@ import platform
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from contextlib import redirect_stderr, redirect_stdout
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 ROOT = Path(__file__).resolve().parent
 UI_DIR = ROOT / "webui"
 DEFAULT_SOURCE = str(Path.home() / "Downloads" / "efmd26")
 DEFAULT_OUTPUT = str(Path.home() / "Downloads" / "efmd26_markdown")
+DEFAULT_INTERNAL_API_BASE_URL = "http://127.0.0.1:8766"
 
 # Load .env from project root (does not overwrite already-set env vars)
 _dotenv_path = ROOT / ".env"
@@ -156,6 +161,57 @@ def detect_default_ocr_lang():
     return f"{primary}+eng"
 
 
+def _api_request(base_url, method, path, payload=None, timeout=30):
+    base = (base_url or DEFAULT_INTERNAL_API_BASE_URL).strip().rstrip("/")
+    url = f"{base}{path}"
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = urllib_request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib_error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(body)
+        except Exception:
+            detail = body or f"HTTP {exc.code}"
+        raise RuntimeError(f"Internal API {method} {path} failed ({exc.code}): {detail}") from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"Internal API unreachable at {base}: {exc.reason}") from exc
+
+
+def _run_internal_api_job(base_url, source_dir, output_dir, options):
+    submit_payload = {
+        "source_dir": source_dir,
+        "output_dir": output_dir or "",
+        "options": options,
+    }
+    submit = _api_request(base_url, "POST", "/api/jobs", submit_payload, timeout=30)
+    job_id = (submit.get("id") or "").strip()
+    if not job_id:
+        raise RuntimeError(f"Internal API did not return a job id: {submit}")
+
+    deadline = time.time() + 60 * 60 * 2
+    while time.time() < deadline:
+        job = _api_request(base_url, "GET", f"/api/jobs/{job_id}", timeout=30)
+        status = (job.get("status") or "").strip().lower()
+        if status == "completed":
+            return job
+        if status in {"failed", "cancelled"}:
+            raise RuntimeError(
+                f"Internal API job {job_id} ended with status={status}: {job.get('error') or 'no details'}"
+            )
+        time.sleep(3)
+
+    raise RuntimeError(f"Internal API job {job_id} timed out after 2 hours")
+
+
 class WebUIHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
@@ -169,6 +225,35 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        parsed = urlsplit(self.path)
+
+        if parsed.path.startswith("/internal-api/job/"):
+            try:
+                job_id = parsed.path.rsplit("/", 1)[-1].strip()
+                if not job_id:
+                    raise ValueError("Missing job id")
+                query = parse_qs(parsed.query)
+                base_url = (
+                    (query.get("base_url", [DEFAULT_INTERNAL_API_BASE_URL])[0] or DEFAULT_INTERNAL_API_BASE_URL)
+                    .strip()
+                )
+                job = _api_request(base_url, "GET", f"/api/jobs/{job_id}", timeout=30)
+                result_data = job.get("result") or {}
+                chapterized_mp3 = (result_data.get("chapterized_mp3") or "").strip()
+                self._send_json(
+                    {
+                        "ok": True,
+                        "job": job,
+                        "api_base_url": base_url,
+                        "audio_segments_endpoint": f"{base_url.rstrip('/')}/api/audio/{job_id}",
+                        "chapters_mp3_endpoint": f"{base_url.rstrip('/')}/api/audio/{job_id}/chapters.mp3",
+                        "chapters_mp3_path": chapterized_mp3,
+                    }
+                )
+            except Exception as exc:
+                self._send_json({"ok": False, "error": normalize_error_message(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+
         if self.path == "/health":
             self._send_json({"ok": True, "status": "running"})
             return
@@ -178,6 +263,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "ok": True,
                 "source_dir": DEFAULT_SOURCE,
                 "output_dir": DEFAULT_OUTPUT,
+                "internal_api_base_url": DEFAULT_INTERNAL_API_BASE_URL,
+                "use_internal_api": False,
                 "pdf_text_ocr_lang": detect_default_ocr_lang(),
                 "pdf_text_ocr_fallback": True,
                 "has_openai_api_key": bool((os.environ.get("OPENAI_API_KEY") or "").strip()),
@@ -192,7 +279,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
-        if self.path != "/convert":
+        if self.path not in {"/convert", "/internal-api/submit"}:
             self._send_json({"ok": False, "error": "Unknown endpoint."}, HTTPStatus.NOT_FOUND)
             return
 
@@ -200,6 +287,45 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             raw_body = self.rfile.read(length) if length > 0 else b"{}"
             payload = json.loads(raw_body.decode("utf-8"))
+
+            if self.path == "/internal-api/submit":
+                source_dir = (payload.get("source_dir") or "").strip()
+                output_dir = (payload.get("output_dir") or "").strip()
+                options = payload.get("options") or {}
+                if not isinstance(options, dict):
+                    raise ValueError("options must be an object")
+                base_url = (
+                    (payload.get("internal_api_base_url") or DEFAULT_INTERNAL_API_BASE_URL)
+                    .strip()
+                    or DEFAULT_INTERNAL_API_BASE_URL
+                )
+                if not source_dir:
+                    raise ValueError("Please provide a Moodle backup directory.")
+                submit = _api_request(
+                    base_url,
+                    "POST",
+                    "/api/jobs",
+                    {
+                        "source_dir": source_dir,
+                        "output_dir": output_dir,
+                        "options": options,
+                    },
+                    timeout=30,
+                )
+                job_id = (submit.get("id") or "").strip()
+                if not job_id:
+                    raise RuntimeError(f"Internal API did not return a job id: {submit}")
+                self._send_json(
+                    {
+                        "ok": True,
+                        "job_id": job_id,
+                        "api_base_url": base_url,
+                        "status": submit.get("status", "pending"),
+                        "message": "Internal API job submitted.",
+                    }
+                )
+                return
+
             source_dir = (payload.get("source_dir") or "").strip()
             output_dir = (payload.get("output_dir") or "").strip()
             single_page = bool(payload.get("single_page"))
@@ -241,6 +367,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             notebooklm_export = bool(payload.get("notebooklm_export"))
             notebooklm_zip_raw = payload.get("notebooklm_zip")
             notebooklm_zip = (notebooklm_export if notebooklm_zip_raw is None else bool(notebooklm_zip_raw))
+            use_internal_api = bool(payload.get("use_internal_api"))
+            internal_api_base_url = (payload.get("internal_api_base_url") or DEFAULT_INTERNAL_API_BASE_URL).strip() or DEFAULT_INTERNAL_API_BASE_URL
 
             if not source_dir:
                 raise ValueError("Please provide a Moodle backup directory.")
@@ -248,6 +376,51 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             runtime_error = runtime_error_if_unsupported()
             if runtime_error:
                 raise RuntimeError(runtime_error)
+
+            if use_internal_api:
+                internal_options = {
+                    "single_page": single_page,
+                    "structured_weeks": structured_weeks,
+                    "week_pages": week_pages,
+                    "native_week_pages": native_week_pages,
+                    "pdf_text_blocks": pdf_text_blocks,
+                    "pdf_text_max_pages": pdf_text_max_pages,
+                    "pdf_text_max_chars": pdf_text_max_chars,
+                    "ai_summary_language": ai_summary_language,
+                    "ai_summary_max_chars": ai_summary_max_chars,
+                    "chapterized_mp3": True,
+                    "accessibility_rewrite": True,
+                }
+                job = _run_internal_api_job(
+                    internal_api_base_url,
+                    source_dir,
+                    output_dir,
+                    internal_options,
+                )
+                result_data = job.get("result") or {}
+                job_id = job.get("id")
+                resolved_output_dir = (job.get("output_dir") or result_data.get("output_dir") or "").strip()
+                chapterized_mp3 = (result_data.get("chapterized_mp3") or "").strip()
+
+                result = {
+                    "ok": True,
+                    "api_mode": "internal",
+                    "message": "Internal API job completed successfully.",
+                    "source_dir": source_dir,
+                    "output_dir": resolved_output_dir,
+                    "job_id": job_id,
+                    "job_status": job.get("status"),
+                    "job_attempts": job.get("attempts", 0),
+                    "job_error": job.get("error"),
+                    "api_base_url": internal_api_base_url,
+                    "audio_segments_endpoint": f"{internal_api_base_url.rstrip('/')}/api/audio/{job_id}",
+                    "chapters_mp3_endpoint": f"{internal_api_base_url.rstrip('/')}/api/audio/{job_id}/chapters.mp3",
+                    "chapters_mp3_path": chapterized_mp3,
+                    "job_result": result_data,
+                    "log": "Internal API mode used. See job_result for pipeline details.",
+                }
+                self._send_json(result)
+                return
 
             from moodle2md import convert_course
 

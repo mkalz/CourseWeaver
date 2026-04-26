@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CourseWeaver - Local Converter</title>
-  <link id="app-favicon" rel="icon" href="/courseweaver-icon.svg" type="image/svg+xml">
+  <title>CourseBeaver - Local Converter</title>
+  <link id="app-favicon" rel="icon" href="/coursebeaver-icon.svg" type="image/svg+xml">
   <style>
     :root {
       --bg: #09111f;
@@ -233,6 +233,48 @@
     .status.success.gemini-green  { border-left: 4px solid #4caf50; }
     .status.success.gemini-yellow { border-left: 4px solid #f5a623; }
     .status.success.gemini-red    { border-left: 4px solid #e74c3c; }
+    .job-progress {
+      margin-top: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--panel-2);
+      padding: 10px 12px;
+    }
+    .job-progress.hidden {
+      display: none;
+    }
+    .job-progress-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+    .job-progress-track {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(120, 152, 212, 0.2);
+      overflow: hidden;
+      border: 1px solid rgba(120, 152, 212, 0.28);
+    }
+    .job-progress-fill {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #7ec3ff, #4fe2c0);
+      transition: width 0.35s ease;
+    }
+    .job-progress-meta {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
     code, pre {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
@@ -346,6 +388,73 @@
     }
     a { color: #a9c7ff; }
     .small { font-size: 13px; color: var(--muted); }
+    .wizard {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--panel-2);
+      padding: 14px;
+      margin-bottom: 16px;
+    }
+    .wizard-title {
+      margin: 0 0 8px;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+    .wizard-progress {
+      margin: 0 0 10px;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 700;
+    }
+    .wizard-step {
+      display: none;
+      margin-top: 8px;
+    }
+    .wizard-step.active {
+      display: block;
+    }
+    .wizard-nav {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .mode-card {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .mode-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(10, 17, 34, 0.45);
+    }
+    .mode-option label {
+      margin: 0;
+      font-weight: 600;
+    }
+    .wizard-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .advanced-wrap {
+      margin-top: 10px;
+    }
+    .advanced-wrap summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: #dce8ff;
+      margin-bottom: 8px;
+    }
     #pdf_text_ocr_lang_hint {
       display: block;
       margin-top: 8px;
@@ -415,10 +524,10 @@
       <div class="hero-top">
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">
-            <img id="brand-logo" src="/courseweaver-logo-dark.svg" alt="" loading="eager" decoding="async">
+            <img id="brand-logo" src="/coursebeaver-logo.svg" alt="" loading="eager" decoding="async">
           </div>
           <div class="brand-text">
-            <p class="eyebrow">CourseWeaver</p>
+            <p class="eyebrow">CourseBeaver</p>
             <h1>Local Conversion Studio</h1>
           </div>
         </div>
@@ -432,11 +541,76 @@
 
     <div class="card">
       <form id="convert-form">
-        <label for="source_dir">Moodle backup folder</label>
-        <input id="source_dir" name="source_dir" placeholder="/path/to/unpacked-moodle-backup" required>
+        <input id="source_dir" name="source_dir" type="hidden">
+        <input id="output_dir" name="output_dir" type="hidden">
+        <input id="use_internal_api" name="use_internal_api" type="hidden">
 
-        <label for="output_dir">Output folder</label>
-        <input id="output_dir" name="output_dir" placeholder="/path/to/output-folder">
+        <div class="wizard" id="guided-wizard">
+          <p class="wizard-title">Guided Setup</p>
+          <p class="wizard-progress" id="wizard-progress">Step 1 of 3</p>
+
+          <div class="wizard-step active" data-step="1">
+            <label for="guided_source_dir">1) Moodle export path</label>
+            <input id="guided_source_dir" placeholder="/path/to/unpacked-moodle-backup" required>
+
+            <label for="guided_output_dir">Auto output folder (md suffix)</label>
+            <input id="guided_output_dir" placeholder="/path/to/unpacked-moodle-backup_md">
+            <p class="wizard-note">Output is auto-filled from source with <code>_md</code> and can still be edited.</p>
+          </div>
+
+          <div class="wizard-step" data-step="2">
+            <label>2) Processing mode</label>
+            <div class="mode-card">
+              <div class="mode-option">
+                <input id="mode_local_api" type="radio" name="guided_mode" value="local" checked>
+                <label for="mode_local_api">Local internal API (FastAPI + local Ollama/TTS pipeline)</label>
+              </div>
+              <div class="mode-option">
+                <input id="mode_web_api" type="radio" name="guided_mode" value="web">
+                <label for="mode_web_api">Web API mode (Gemini/OpenAI in direct converter flow)</label>
+              </div>
+            </div>
+
+            <label for="guided_ai_provider">Web API provider (only used in Web API mode)</label>
+            <select id="guided_ai_provider">
+              <option value="openai" selected>OpenAI</option>
+              <option value="gemini">Gemini</option>
+            </select>
+
+            <label for="internal_api_base_url">Internal API base URL (only used in Local API mode)</label>
+            <input id="internal_api_base_url" name="internal_api_base_url" value="http://127.0.0.1:8766" placeholder="http://127.0.0.1:8766">
+          </div>
+
+          <div class="wizard-step" data-step="3">
+            <label>3) Export formats</label>
+            <div class="checkbox-row">
+              <input id="guided_export_single_page" type="checkbox">
+              <label for="guided_export_single_page">Single integrated Markdown page (ALL_IN_ONE.md)</label>
+            </div>
+            <div class="checkbox-row">
+              <input id="guided_export_zip" type="checkbox">
+              <label for="guided_export_zip">AFFiNE ZIP packages</label>
+            </div>
+            <div class="checkbox-row">
+              <input id="guided_export_html" type="checkbox">
+              <label for="guided_export_html">AFFiNE HTML export</label>
+            </div>
+            <div class="checkbox-row">
+              <input id="guided_export_notebooklm" type="checkbox" checked>
+              <label for="guided_export_notebooklm">NotebookLM import folder (+ zip)</label>
+            </div>
+            <p class="wizard-note">Click <strong>Apply wizard choices</strong> to populate form values below.</p>
+          </div>
+
+          <div class="wizard-nav">
+            <button type="button" class="secondary" id="wizard-prev-btn">Back</button>
+            <button type="button" class="secondary" id="wizard-next-btn">Next</button>
+            <button type="button" id="wizard-apply-btn">Apply wizard choices</button>
+          </div>
+        </div>
+
+        <details class="advanced-wrap">
+          <summary>Advanced options</summary>
 
         <div class="checkbox-row">
           <input id="single_page" name="single_page" type="checkbox">
@@ -620,8 +794,19 @@
           <div id="key-status-grid" class="key-status-grid"></div>
           <p id="key-status-note" class="small">Checking environment variables...</p>
         </div>
+        </details>
       </form>
       <div id="status" class="status">Ready.</div>
+      <div id="job-progress" class="job-progress hidden">
+        <div class="job-progress-header">
+          <span id="job-progress-label">Waiting</span>
+          <span id="job-progress-percent">0%</span>
+        </div>
+        <div class="job-progress-track">
+          <div id="job-progress-fill" class="job-progress-fill"></div>
+        </div>
+        <div id="job-progress-meta" class="job-progress-meta">No active internal API job.</div>
+      </div>
     </div>
 
     <div class="card">
@@ -641,6 +826,11 @@
   <script>
     const form = document.getElementById('convert-form');
     const statusBox = document.getElementById('status');
+    const jobProgressBox = document.getElementById('job-progress');
+    const jobProgressLabel = document.getElementById('job-progress-label');
+    const jobProgressPercent = document.getElementById('job-progress-percent');
+    const jobProgressFill = document.getElementById('job-progress-fill');
+    const jobProgressMeta = document.getElementById('job-progress-meta');
     const resultBox = document.getElementById('result-box');
     const geminiHealthBadge = document.getElementById('gemini-health-badge');
     const submitBtn = document.getElementById('submit-btn');    const defaultsBtn = document.getElementById('defaults-btn');
@@ -648,6 +838,22 @@
     const keyStatusNote = document.getElementById('key-status-note');
     const sourceInput = document.getElementById('source_dir');
     const outputInput = document.getElementById('output_dir');
+    const guidedSourceInput = document.getElementById('guided_source_dir');
+    const guidedOutputInput = document.getElementById('guided_output_dir');
+    const guidedModeLocalInput = document.getElementById('mode_local_api');
+    const guidedModeWebInput = document.getElementById('mode_web_api');
+    const guidedAiProviderInput = document.getElementById('guided_ai_provider');
+    const guidedExportSinglePageInput = document.getElementById('guided_export_single_page');
+    const guidedExportZipInput = document.getElementById('guided_export_zip');
+    const guidedExportHtmlInput = document.getElementById('guided_export_html');
+    const guidedExportNotebooklmInput = document.getElementById('guided_export_notebooklm');
+    const wizardProgressEl = document.getElementById('wizard-progress');
+    const wizardPrevBtn = document.getElementById('wizard-prev-btn');
+    const wizardNextBtn = document.getElementById('wizard-next-btn');
+    const wizardApplyBtn = document.getElementById('wizard-apply-btn');
+    const wizardSteps = Array.from(document.querySelectorAll('.wizard-step'));
+    const useInternalApiInput = document.getElementById('use_internal_api');
+    const internalApiBaseUrlInput = document.getElementById('internal_api_base_url');
     const singlePageInput = document.getElementById('single_page');
     const structuredWeeksInput = document.getElementById('structured_weeks');
     const weekPagesInput = document.getElementById('week_pages');
@@ -692,6 +898,69 @@
       has_elevenlabs_api_key: false,
       has_elevenlabs_voice_id: false,
     };
+    let wizardStepIndex = 0;
+    let outputTouched = false;
+
+    function suggestOutputDirFromSource(sourcePath) {
+      const raw = (sourcePath || '').trim();
+      if (!raw) return '';
+      let normalized = raw.replace(/[\\/]+$/, '');
+      normalized = normalized.replace(/\.(mbz|zip)$/i, '');
+      if (/_md$/i.test(normalized)) return normalized;
+      return `${normalized}_md`;
+    }
+
+    function syncHiddenSourceOutputFromGuided() {
+      sourceInput.value = (guidedSourceInput.value || '').trim();
+      outputInput.value = (guidedOutputInput.value || '').trim();
+    }
+
+    function maybeAutoFillOutputFromSource(force = false) {
+      const suggested = suggestOutputDirFromSource(guidedSourceInput.value);
+      if (!suggested) return;
+      if (force || !outputTouched || !guidedOutputInput.value.trim()) {
+        guidedOutputInput.value = suggested;
+      }
+      syncHiddenSourceOutputFromGuided();
+    }
+
+    function updateWizardModeUi() {
+      const webMode = guidedModeWebInput.checked;
+      guidedAiProviderInput.disabled = !webMode;
+      internalApiBaseUrlInput.disabled = webMode;
+    }
+
+    function updateWizardStepUi() {
+      wizardSteps.forEach((el, idx) => {
+        el.classList.toggle('active', idx === wizardStepIndex);
+      });
+      if (wizardProgressEl) wizardProgressEl.textContent = `Step ${wizardStepIndex + 1} of 3`;
+      wizardPrevBtn.disabled = wizardStepIndex === 0;
+      wizardNextBtn.disabled = wizardStepIndex === wizardSteps.length - 1;
+      wizardApplyBtn.style.display = wizardStepIndex === wizardSteps.length - 1 ? 'inline-block' : 'none';
+    }
+
+    function applyWizardChoicesToForm(showMessage = true) {
+      syncHiddenSourceOutputFromGuided();
+      useInternalApiInput.checked = guidedModeLocalInput.checked;
+      aiSummaryProviderInput.value = guidedAiProviderInput.value || 'openai';
+      singlePageInput.checked = guidedExportSinglePageInput.checked;
+      zipOutputInput.checked = guidedExportZipInput.checked;
+      htmlOutputInput.checked = guidedExportHtmlInput.checked;
+      notebooklmExportInput.checked = guidedExportNotebooklmInput.checked;
+      notebooklmZipInput.checked = guidedExportNotebooklmInput.checked;
+
+      if (guidedModeWebInput.checked) {
+        aiWeekSummaryInput.checked = true;
+      }
+
+      applyAiProviderDefaults();
+      renderKeyStatus();
+      if (showMessage) {
+        statusBox.textContent = 'Wizard choices applied. You can now run conversion or tune advanced options.';
+        statusBox.className = 'status success';
+      }
+    }
 
     const sunIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><line x1="12" y1="2" x2="12" y2="5"></line><line x1="12" y1="19" x2="12" y2="22"></line><line x1="2" y1="12" x2="5" y2="12"></line><line x1="19" y1="12" x2="22" y2="12"></line><line x1="4.9" y1="4.9" x2="7" y2="7"></line><line x1="17" y1="17" x2="19.1" y2="19.1"></line><line x1="17" y1="7" x2="19.1" y2="4.9"></line><line x1="4.9" y1="19.1" x2="7" y2="17"></line></svg>';
     const moonIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5a8.5 8.5 0 1 1-11-11 7 7 0 1 0 11 11z"></path></svg>';
@@ -719,20 +988,20 @@
       const nextTheme = themeName === 'light' ? 'light' : 'dark';
       document.body.setAttribute('data-theme', nextTheme);
       if (brandLogoEl) {
-        brandLogoEl.src = nextTheme === 'light' ? '/courseweaver-logo-light.svg' : '/courseweaver-logo-dark.svg';
+        brandLogoEl.src = '/coursebeaver-logo.svg';
       }
       if (appFaviconEl) {
-        appFaviconEl.href = '/courseweaver-icon.svg';
+        appFaviconEl.href = '/coursebeaver-icon.svg';
       }
       if (themeLabelEl && themeIconEl) {
         const switchTo = nextTheme === 'light' ? 'dark' : 'light';
         themeLabelEl.textContent = `Switch to ${switchTo}`;
         themeIconEl.innerHTML = switchTo === 'light' ? sunIcon : moonIcon;
       }
-      localStorage.setItem('courseweaver-theme', nextTheme);
+      localStorage.setItem('coursebeaver-theme', nextTheme);
     }
 
-    const storedTheme = localStorage.getItem('courseweaver-theme');
+    const storedTheme = localStorage.getItem('coursebeaver-theme');
     applyTheme(storedTheme === 'light' ? 'light' : 'dark');
     if (themeToggleBtn) {
       themeToggleBtn.addEventListener('click', () => {
@@ -744,8 +1013,18 @@
     async function loadDefaults() {
       const res = await fetch('/defaults');
       const data = await res.json();
-      sourceInput.value = data.source_dir || '';
-      outputInput.value = data.output_dir || '';
+      guidedSourceInput.value = data.source_dir || '';
+      guidedOutputInput.value = data.output_dir || '';
+      outputTouched = false;
+      syncHiddenSourceOutputFromGuided();
+      useInternalApiInput.checked = Boolean(data.use_internal_api);
+      internalApiBaseUrlInput.value = data.internal_api_base_url || 'http://127.0.0.1:8766';
+      if (useInternalApiInput.checked) {
+        guidedModeLocalInput.checked = true;
+      } else {
+        guidedModeWebInput.checked = true;
+      }
+      updateWizardModeUi();
       pdfTextOcrLangInput.value = data.pdf_text_ocr_lang || 'eng';
       const ocrLangHint = document.getElementById('pdf_text_ocr_lang_hint');
       if (ocrLangHint) ocrLangHint.textContent = `Auto-detected from system locale: ${data.pdf_text_ocr_lang || 'eng'}`;
@@ -758,6 +1037,37 @@
       keyAvailability.has_elevenlabs_voice_id = Boolean(data.has_elevenlabs_voice_id);
       renderKeyStatus();
     }
+
+    guidedSourceInput.addEventListener('input', () => {
+      maybeAutoFillOutputFromSource(false);
+    });
+    guidedOutputInput.addEventListener('input', () => {
+      outputTouched = true;
+      syncHiddenSourceOutputFromGuided();
+    });
+    guidedModeLocalInput.addEventListener('change', updateWizardModeUi);
+    guidedModeWebInput.addEventListener('change', updateWizardModeUi);
+    wizardPrevBtn.addEventListener('click', () => {
+      wizardStepIndex = Math.max(0, wizardStepIndex - 1);
+      updateWizardStepUi();
+    });
+    wizardNextBtn.addEventListener('click', () => {
+      if (wizardStepIndex === 0 && !guidedSourceInput.value.trim()) {
+        statusBox.textContent = 'Please provide a Moodle export path before continuing.';
+        statusBox.className = 'status error';
+        return;
+      }
+      wizardStepIndex = Math.min(wizardSteps.length - 1, wizardStepIndex + 1);
+      updateWizardStepUi();
+    });
+    wizardApplyBtn.addEventListener('click', () => {
+      if (!guidedSourceInput.value.trim()) {
+        statusBox.textContent = 'Please provide a Moodle export path first.';
+        statusBox.className = 'status error';
+        return;
+      }
+      applyWizardChoicesToForm();
+    });
 
     function renderKeyStatus() {
       if (!keyStatusGrid || !keyStatusNote) return;
@@ -918,6 +1228,158 @@
       syncPdfAudioPresetFromValue();
     });
 
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function estimateProgressPercent(status, elapsedSeconds) {
+      const s = (status || '').toLowerCase();
+      if (s === 'pending') return 8;
+      if (s === 'running') {
+        const dynamic = 18 + Math.min(72, Math.floor(elapsedSeconds / 3));
+        return Math.max(18, Math.min(90, dynamic));
+      }
+      if (s === 'completed') return 100;
+      if (s === 'failed' || s === 'cancelled') return 100;
+      return 5;
+    }
+
+    function setJobProgressState({ visible, status, attempts, elapsedSeconds, polls }) {
+      if (!jobProgressBox) return;
+
+      if (!visible) {
+        jobProgressBox.classList.add('hidden');
+        return;
+      }
+
+      const normalizedStatus = (status || 'pending').toLowerCase();
+      const pct = estimateProgressPercent(normalizedStatus, elapsedSeconds || 0);
+
+      jobProgressBox.classList.remove('hidden');
+      jobProgressLabel.textContent = `Status: ${normalizedStatus}`;
+      jobProgressPercent.textContent = `${pct}%`;
+      jobProgressFill.style.width = `${pct}%`;
+      jobProgressMeta.textContent = `Attempts: ${attempts ?? 0} | Runtime: ${elapsedSeconds ?? 0}s | Polls: ${polls ?? 0}`;
+    }
+
+    function buildInternalOptionsFromPayload(payload) {
+      return {
+        single_page: payload.single_page,
+        structured_weeks: payload.structured_weeks,
+        week_pages: payload.week_pages,
+        native_week_pages: payload.native_week_pages,
+        pdf_text_blocks: payload.pdf_text_blocks,
+        pdf_text_max_pages: payload.pdf_text_max_pages,
+        pdf_text_max_chars: payload.pdf_text_max_chars,
+        ai_summary_language: payload.ai_summary_language,
+        ai_summary_max_chars: payload.ai_summary_max_chars,
+        chapterized_mp3: true,
+        accessibility_rewrite: true,
+      };
+    }
+
+    async function runInternalApiJobWithLiveStatus(payload) {
+      const submitResponse = await fetch('/internal-api/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_dir: payload.source_dir,
+          output_dir: payload.output_dir,
+          internal_api_base_url: payload.internal_api_base_url,
+          options: buildInternalOptionsFromPayload(payload),
+        }),
+      });
+      const submitData = await submitResponse.json();
+      if (!submitResponse.ok || !submitData.ok) {
+        throw new Error(submitData.error || 'Failed to submit internal API job');
+      }
+
+      const jobId = submitData.job_id;
+      const apiBaseUrl = submitData.api_base_url || payload.internal_api_base_url;
+      const startedAt = new Date();
+      let pollCount = 0;
+
+      setJobProgressState({
+        visible: true,
+        status: submitData.status || 'pending',
+        attempts: 0,
+        elapsedSeconds: 0,
+        polls: pollCount,
+      });
+
+      statusBox.textContent = `⏳ Internal API job started (${jobId}). Waiting for progress...`;
+      statusBox.className = 'status';
+
+      const deadlineMs = 2 * 60 * 60 * 1000;
+      while (Date.now() - startedAt.getTime() < deadlineMs) {
+        pollCount += 1;
+        const pollResponse = await fetch(`/internal-api/job/${encodeURIComponent(jobId)}?base_url=${encodeURIComponent(apiBaseUrl)}`);
+        const pollData = await pollResponse.json();
+        if (!pollResponse.ok || !pollData.ok) {
+          throw new Error(pollData.error || 'Failed to poll internal API job status');
+        }
+
+        const job = pollData.job || {};
+        const status = (job.status || 'unknown').toLowerCase();
+        const attempts = job.attempts ?? 0;
+        const updatedAt = job.updated_at || 'n/a';
+        const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt.getTime()) / 1000));
+
+        setJobProgressState({
+          visible: true,
+          status,
+          attempts,
+          elapsedSeconds,
+          polls: pollCount,
+        });
+
+        statusBox.textContent = `⏳ Internal API job ${jobId}: ${status} (attempt ${attempts})`;
+        statusBox.className = 'status';
+        resultBox.textContent = [
+          `Mode: Internal API`,
+          `API base URL: ${apiBaseUrl}`,
+          `Job ID: ${jobId}`,
+          `Status: ${status}`,
+          `Attempts: ${attempts}`,
+          `Last update: ${updatedAt}`,
+          `Error: ${job.error || 'none'}`,
+        ].join('\n');
+
+        if (status === 'completed') {
+          statusBox.textContent = `✅ Internal API job ${jobId} completed successfully.`;
+          statusBox.className = 'status success';
+          setJobProgressState({
+            visible: true,
+            status: 'completed',
+            attempts,
+            elapsedSeconds,
+            polls: pollCount,
+          });
+          resultBox.textContent = [
+            `Source: ${payload.source_dir}`,
+            `Output: ${job.output_dir || '(auto)'}`,
+            `Mode: Internal API`,
+            `API base URL: ${apiBaseUrl}`,
+            `Job ID: ${jobId}`,
+            `Job status: ${status}`,
+            `Job attempts: ${attempts}`,
+            `Audio segments endpoint: ${pollData.audio_segments_endpoint || 'n/a'}`,
+            `Chapterized MP3 endpoint: ${pollData.chapters_mp3_endpoint || 'n/a'}`,
+            `Chapterized MP3 file: ${pollData.chapters_mp3_path || 'not provided'}`,
+          ].join('\n');
+          return;
+        }
+
+        if (status === 'failed' || status === 'cancelled') {
+          throw new Error(`Internal API job ${jobId} ended with ${status}: ${job.error || 'no details'}`);
+        }
+
+        await sleep(3000);
+      }
+
+      throw new Error(`Internal API job ${jobId} timed out after 2 hours`);
+    }
+
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       submitBtn.disabled = true;
@@ -925,11 +1387,15 @@
       statusBox.className = 'status';
       statusBox.classList.remove('gemini-green', 'gemini-yellow', 'gemini-red');
       resultBox.textContent = 'Please wait…';
+      setJobProgressState({ visible: false });
 
       try {
+        applyWizardChoicesToForm(false);
         const payload = {
           source_dir: sourceInput.value.trim(),
           output_dir: outputInput.value.trim(),
+          use_internal_api: useInternalApiInput.checked,
+          internal_api_base_url: internalApiBaseUrlInput.value.trim() || 'http://127.0.0.1:8766',
           single_page: singlePageInput.checked,
           structured_weeks: structuredWeeksInput.checked,
           week_pages: weekPagesInput.checked,
@@ -963,6 +1429,11 @@
           html_output: htmlOutputInput.checked,
         };
 
+        if (payload.use_internal_api) {
+          await runInternalApiJobWithLiveStatus(payload);
+          return;
+        }
+
         const preflightErrors = preflightValidationErrors(payload);
         if (preflightErrors.length) {
           throw new Error(preflightErrors.join(' '));
@@ -987,6 +1458,25 @@
         if (healthLevel === 'green')  statusBox.classList.add('gemini-green');
         else if (healthLevel === 'yellow') statusBox.classList.add('gemini-yellow');
         else if (healthLevel === 'red')    statusBox.classList.add('gemini-red');
+        if (data.api_mode === 'internal') {
+          resultBox.textContent = [
+            `Source: ${data.source_dir}`,
+            `Output: ${data.output_dir || '(auto)'}`,
+            `Mode: Internal API`,
+            `API base URL: ${data.api_base_url || 'n/a'}`,
+            `Job ID: ${data.job_id || 'n/a'}`,
+            `Job status: ${data.job_status || 'n/a'}`,
+            `Job attempts: ${data.job_attempts ?? 0}`,
+            `Job error: ${data.job_error || 'none'}`,
+            `Audio segments endpoint: ${data.audio_segments_endpoint || 'n/a'}`,
+            `Chapterized MP3 endpoint: ${data.chapters_mp3_endpoint || 'n/a'}`,
+            `Chapterized MP3 file: ${data.chapters_mp3_path || 'not provided'}`,
+            '',
+            data.log ? `Log:\n${data.log}` : 'Log: no additional output',
+          ].join('\n');
+          return;
+        }
+
         resultBox.textContent = [
           `Source: ${data.source_dir}`,
           `Output: ${data.output_dir}`,
@@ -1049,6 +1539,7 @@
       } catch (error) {
         statusBox.textContent = '❌ ' + error.message;
         statusBox.className = 'status error';
+        setJobProgressState({ visible: false });
         if (geminiHealthBadge) {
           geminiHealthBadge.className = 'health-badge hidden';
           geminiHealthBadge.textContent = '';
@@ -1062,6 +1553,9 @@
     applyAiProviderDefaults(true);
     syncPdfAudioPresetFromValue();
     loadDefaults().catch(() => {});
+    updateWizardModeUi();
+    updateWizardStepUi();
+    maybeAutoFillOutputFromSource(false);
     renderKeyStatus();
   </script>
 </body>

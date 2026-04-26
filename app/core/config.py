@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # ── Filesystem paths ──────────────────────────────────────────────────────
     data_dir: Path = Path("data")
-    db_path: Path = Path("data/courseweaver.db")
+    db_path: Path = Path("data/coursebeaver.db")
     audio_output_dir: Path = Path("data/audio")
     model_dir: Path = Path("data/models")
 
@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     ai_summary_provider: str = "local"   # "local" | "openai" | "gemini"
     ai_summary_model: str = ""           # overrides ollama_model when non-local
     ai_summary_base_url: str = ""        # overrides ollama_base_url when non-local
+
+    def model_post_init(self, __context: object) -> None:
+        """Prefer the new DB name and transparently fall back to legacy data."""
+        default_db = self.data_dir / "coursebeaver.db"
+        legacy_db = self.data_dir / "courseweaver.db"
+        if self.db_path == default_db and (not default_db.exists()) and legacy_db.exists():
+            self.db_path = legacy_db
 
     def effective_gpu_device(self) -> str:
         """Return 'cuda', 'mps', or 'cpu' based on availability and config."""

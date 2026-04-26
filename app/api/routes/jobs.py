@@ -59,8 +59,8 @@ async def get_job(job_id: str, job_repo: JobRepoDep) -> Job:
     return job
 
 
-@router.delete("/{job_id}", status_code=204, summary="Cancel / delete a job")
-async def delete_job(job_id: str, job_repo: JobRepoDep) -> None:
+@router.delete("/{job_id}", summary="Cancel / delete a job")
+async def delete_job(job_id: str, job_repo: JobRepoDep) -> dict[str, str]:
     job = await job_repo.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
@@ -69,6 +69,7 @@ async def delete_job(job_id: str, job_repo: JobRepoDep) -> None:
             status_code=409, detail="Cannot delete a running job. Wait for completion."
         )
     await job_repo.delete(job_id)
+    return {"status": "deleted"}
 
 
 @router.post("/{job_id}/retry", status_code=202, summary="Re-enqueue a failed job")

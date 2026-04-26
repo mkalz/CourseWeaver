@@ -1,12 +1,12 @@
-# CourseWeaver
+# CourseBeaver
 
-[![CI](https://img.shields.io/github/actions/workflow/status/mkalz/CourseWeaver/ci.yml?branch=main&label=CI)](https://github.com/mkalz/CourseWeaver/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/mkalz/CourseBeaver/ci.yml?branch=main&label=CI)](https://github.com/mkalz/CourseBeaver/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-16a34a.svg)](LICENSE)
 
-![CourseWeaver logo](webui/courseweaver-logo-dark.svg)
+![CourseBeaver logo](webui/coursebeaver-logo.svg)
 
-CourseWeaver converts unpacked Moodle course backups into structured knowledge bundles for Markdown, AFFiNE, and NotebookLM workflows.
+CourseBeaver converts unpacked Moodle course backups into structured knowledge bundles for Markdown, AFFiNE, and NotebookLM workflows.
 
 It is the successor to Moodle2Affine and extends the original converter with a local Web UI, structured week exports, AFFiNE ZIP and Snapshot output, PDF text extraction with OCR fallback, and NotebookLM-ready folder bundles.
 
@@ -182,7 +182,7 @@ python moodle2md.py -d /path/to/unpacked-moodle-backup -o /path/to/output \
 
 ### AI summaries and audio production
 
-CourseWeaver supports AI-generated weekly summaries and audio output with a two-phase pipeline:
+CourseBeaver supports AI-generated weekly summaries and audio output with a two-phase pipeline:
 
 1. Phase 1: Generate all weekly summaries.
 2. Phase 2: Generate audio from the generated summaries.
@@ -240,7 +240,7 @@ AI processing writes job-level artifacts to `files/ai_jobs/`:
 - `files/ai_jobs/output/` contains generated summary/audio metadata markdown files.
 - `files/ai_jobs/manifest.jsonl` tracks job states (`queued`, `done`, `reused`, `skipped`, `error`).
 
-With `--audio-only-missing`, CourseWeaver resumes from existing output and uses manifest state to skip already completed jobs when possible.
+With `--audio-only-missing`, CourseBeaver resumes from existing output and uses manifest state to skip already completed jobs when possible.
 
 #### End-to-end examples
 
@@ -355,7 +355,7 @@ requirements.txt    Python dependencies
 
 ## Upstream origin and attribution
 
-CourseWeaver is the successor to Moodle2Affine and remains a modernization and extension of the original project:
+CourseBeaver is the successor to Moodle2Affine and remains a modernization and extension of the original project:
 
 - **Original repository:** `josedom24/moodle2md`
 - **URL:** `https://github.com/josedom24/moodle2md`

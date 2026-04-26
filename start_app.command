@@ -1,5 +1,5 @@
 #!/bin/zsh
-# start_app.command – macOS launcher for the CourseWeaver FastAPI application.
+# start_app.command – macOS launcher for the CourseBeaver FastAPI application.
 # Double-click in Finder to start.
 cd "$(dirname "$0")"
 
@@ -34,7 +34,7 @@ if ! command -v ollama &>/dev/null; then
 fi
 
 echo ""
-echo "Starting CourseWeaver API on http://127.0.0.1:8766"
+echo "Starting CourseBeaver API on http://127.0.0.1:8766"
 echo "API docs: http://127.0.0.1:8766/docs"
 echo ""
 ./.venv/bin/python -m app.main

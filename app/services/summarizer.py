@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -120,8 +121,13 @@ class SummariserService:
             "Authorization": f"Bearer {api_key}",
         }
         url = f"{base_url}/chat/completions"
+        host = (urlparse(base_url).hostname or "").lower()
+        trust_env = host not in {"127.0.0.1", "localhost"}
         try:
-            async with httpx.AsyncClient(timeout=self._settings.local_llm_timeout_seconds) as client:
+            async with httpx.AsyncClient(
+                timeout=self._settings.local_llm_timeout_seconds,
+                trust_env=trust_env,
+            ) as client:
                 resp = await client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
         except httpx.ConnectError as exc:

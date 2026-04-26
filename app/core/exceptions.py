@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 
-class CourseWeaverError(Exception):
+class CourseBeaverError(Exception):
     """Base error for all application exceptions."""
 
 
 # ── Conversion ────────────────────────────────────────────────────────────────
 
-class ConversionError(CourseWeaverError):
+class ConversionError(CourseBeaverError):
     """Moodle backup conversion failed."""
 
 
@@ -18,13 +18,13 @@ class SourceDirectoryNotFound(ConversionError):
 
 # ── Chunking ──────────────────────────────────────────────────────────────────
 
-class ChunkingError(CourseWeaverError):
+class ChunkingError(CourseBeaverError):
     """Semantic chunking of Markdown content failed."""
 
 
 # ── Summarisation ─────────────────────────────────────────────────────────────
 
-class SummarisationError(CourseWeaverError):
+class SummarisationError(CourseBeaverError):
     """LLM summarisation request failed."""
 
 
@@ -34,7 +34,7 @@ class OllamaUnavailableError(SummarisationError):
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
-class TTSError(CourseWeaverError):
+class TTSError(CourseBeaverError):
     """Text-to-speech synthesis failed."""
 
 
@@ -48,7 +48,7 @@ class TTSInputTooLong(TTSError):
 
 # ── Audio assembly ────────────────────────────────────────────────────────────
 
-class AudioAssemblyError(CourseWeaverError):
+class AudioAssemblyError(CourseBeaverError):
     """ffmpeg-based audio assembly failed."""
 
 
@@ -58,13 +58,13 @@ class FfmpegNotFound(AudioAssemblyError):
 
 # ── Job management ────────────────────────────────────────────────────────────
 
-class JobNotFound(CourseWeaverError):
+class JobNotFound(CourseBeaverError):
     """Requested job ID does not exist in the database."""
 
 
-class JobAlreadyRunning(CourseWeaverError):
+class JobAlreadyRunning(CourseBeaverError):
     """Cannot start a job that is already in progress."""
 
 
-class JobQueueFull(CourseWeaverError):
+class JobQueueFull(CourseBeaverError):
     """Job queue has reached its capacity limit."""
