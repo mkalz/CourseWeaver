@@ -2424,118 +2424,130 @@ def enrich_week_pages_with_ai_summary_and_audio(
 
     # Phase 2: Create audio from prepared summaries.
     if effective_audio:
-        for task in audio_tasks:
+        def process_week_audio_task(task, allow_resume_manifest_skip=True):
             week_index = task["week_index"]
             week_stem = task["week_stem"]
             relative_path = task["relative_path"]
             week_path = task["week_path"]
-            summary_text = task["summary_text"]
             summary_input_markdown = task["summary_input_markdown"]
             summary_output_markdown = task["summary_output_markdown"]
             existing_audio_link = task["existing_audio_link"]
             audio_job_id = task["audio_job_id"]
-            original_markdown = task["original_markdown"]
 
-            try:
-                audio_rel = None
-                if audio_only_missing:
-                    existing_audio_path = resolve_existing_audio_path(output_path, relative_path, existing_audio_link)
-                    if existing_audio_path is not None:
-                        audio_rel = existing_audio_link
-                        result["audio_skipped_existing"] += 1
-                        append_ai_job_manifest(output_dir, {
-                            "job_type": "week_audio",
-                            "job_id": audio_job_id,
-                            "status": "skipped",
-                            "reason": "audio already exists and audio_only_missing is enabled",
-                            "week_relative_path": relative_path,
-                            "audio_relative_path": audio_rel,
-                        })
+            latest_markdown = week_path.read_text(encoding="utf-8")
+            latest_block = parse_existing_ai_summary_block(latest_markdown)
+            summary_text = (task.get("summary_text") or latest_block.get("summary") or "").strip()
+            if not summary_text:
+                raise RuntimeError("No summary text available for audio generation")
 
-                if audio_rel is None and resume_done_jobs and is_ai_job_done(output_dir, audio_job_id):
-                    prior_audio = latest_ai_job_record(output_dir, audio_job_id) or {}
-                    prior_audio_rel = str(prior_audio.get("audio_relative_path") or "").strip()
-                    resolved_prior_audio = resolve_existing_audio_path(output_path, relative_path, prior_audio_rel)
-                    if resolved_prior_audio is not None:
-                        audio_rel = prior_audio_rel
-                        result["audio_skipped_manifest"] += 1
-                        append_ai_job_manifest(output_dir, {
-                            "job_type": "week_audio",
-                            "job_id": audio_job_id,
-                            "status": "skipped",
-                            "provider": result["audio_provider"],
-                            "reason": "already done (manifest resume)",
-                            "week_relative_path": relative_path,
-                            "audio_relative_path": audio_rel,
-                            "input_markdown": summary_output_markdown or summary_input_markdown,
-                        })
-
-                if audio_rel is None:
+            current_audio_link = (latest_block.get("audio_link") or existing_audio_link or "").strip()
+            audio_rel = None
+            if audio_only_missing:
+                existing_audio_path = resolve_existing_audio_path(output_path, relative_path, current_audio_link)
+                if existing_audio_path is not None:
+                    audio_rel = current_audio_link
+                    result["audio_skipped_existing"] += 1
                     append_ai_job_manifest(output_dir, {
                         "job_type": "week_audio",
                         "job_id": audio_job_id,
-                        "status": "queued",
-                        "provider": result["audio_provider"],
+                        "status": "skipped",
+                        "reason": "audio already exists and audio_only_missing is enabled",
                         "week_relative_path": relative_path,
-                        "input_markdown": summary_output_markdown or summary_input_markdown,
-                    })
-
-                    if gemini_tts:
-                        audio_bytes, audio_mime = call_with_retries(
-                            lambda: request_gemini_tts(
-                                summary_text,
-                                api_key=gemini_tts_key,
-                                model=(gemini_tts_model or "gemini-2.5-flash-preview-tts"),
-                                voice_name=(gemini_tts_voice or "Kore"),
-                                base_url=gemini_tts_base_url,
-                            ),
-                            label=f"gemini tts {relative_path}",
-                            max_attempts=5,
-                            base_delay_seconds=2.0,
-                            on_retry=on_gemini_tts_retry,
-                            on_success=on_gemini_tts_success,
-                        )
-                        ext = ".wav"
-                        if "mpeg" in (audio_mime or "").lower():
-                            ext = ".mp3"
-                        elif "ogg" in (audio_mime or "").lower():
-                            ext = ".ogg"
-                        elif "aac" in (audio_mime or "").lower():
-                            ext = ".aac"
-                    else:
-                        audio_bytes = call_with_retries(
-                            lambda: request_elevenlabs_tts(
-                                summary_text,
-                                api_key=elevenlabs_key,
-                                voice_id=resolved_voice_id,
-                                model_id=(elevenlabs_model_id or "eleven_multilingual_v2"),
-                            ),
-                            label=f"elevenlabs tts {relative_path}",
-                            max_attempts=3,
-                            base_delay_seconds=1.5,
-                        )
-                        ext = ".mp3"
-
-                    audio_name = f"{week_index:02d}_{week_stem}_summary{ext}"
-                    audio_path = audio_dir / audio_name
-                    audio_path.write_bytes(audio_bytes)
-                    audio_rel = ensure_explicit_relative_path(encode_relative_path(f"../files/audio/{audio_name}"))
-                    result["audio_created"] += 1
-                    append_ai_job_manifest(output_dir, {
-                        "job_type": "week_audio",
-                        "job_id": audio_job_id,
-                        "status": "done",
-                        "provider": result["audio_provider"],
-                        "week_relative_path": relative_path,
-                        "input_markdown": summary_output_markdown or summary_input_markdown,
                         "audio_relative_path": audio_rel,
                     })
 
-                week_path.write_text(
-                    upsert_ai_summary_block(original_markdown, summary_text, audio_relative_link=audio_rel),
-                    encoding="utf-8",
-                )
+            if audio_rel is None and allow_resume_manifest_skip and resume_done_jobs and is_ai_job_done(output_dir, audio_job_id):
+                prior_audio = latest_ai_job_record(output_dir, audio_job_id) or {}
+                prior_audio_rel = str(prior_audio.get("audio_relative_path") or "").strip()
+                resolved_prior_audio = resolve_existing_audio_path(output_path, relative_path, prior_audio_rel)
+                if resolved_prior_audio is not None:
+                    audio_rel = prior_audio_rel
+                    result["audio_skipped_manifest"] += 1
+                    append_ai_job_manifest(output_dir, {
+                        "job_type": "week_audio",
+                        "job_id": audio_job_id,
+                        "status": "skipped",
+                        "provider": result["audio_provider"],
+                        "reason": "already done (manifest resume)",
+                        "week_relative_path": relative_path,
+                        "audio_relative_path": audio_rel,
+                        "input_markdown": summary_output_markdown or summary_input_markdown,
+                    })
+
+            if audio_rel is None:
+                append_ai_job_manifest(output_dir, {
+                    "job_type": "week_audio",
+                    "job_id": audio_job_id,
+                    "status": "queued",
+                    "provider": result["audio_provider"],
+                    "week_relative_path": relative_path,
+                    "input_markdown": summary_output_markdown or summary_input_markdown,
+                })
+
+                if gemini_tts:
+                    audio_bytes, audio_mime = call_with_retries(
+                        lambda: request_gemini_tts(
+                            summary_text,
+                            api_key=gemini_tts_key,
+                            model=(gemini_tts_model or "gemini-2.5-flash-preview-tts"),
+                            voice_name=(gemini_tts_voice or "Kore"),
+                            base_url=gemini_tts_base_url,
+                        ),
+                        label=f"gemini tts {relative_path}",
+                        max_attempts=5,
+                        base_delay_seconds=2.0,
+                        on_retry=on_gemini_tts_retry,
+                        on_success=on_gemini_tts_success,
+                    )
+                    ext = ".wav"
+                    if "mpeg" in (audio_mime or "").lower():
+                        ext = ".mp3"
+                    elif "ogg" in (audio_mime or "").lower():
+                        ext = ".ogg"
+                    elif "aac" in (audio_mime or "").lower():
+                        ext = ".aac"
+                else:
+                    audio_bytes = call_with_retries(
+                        lambda: request_elevenlabs_tts(
+                            summary_text,
+                            api_key=elevenlabs_key,
+                            voice_id=resolved_voice_id,
+                            model_id=(elevenlabs_model_id or "eleven_multilingual_v2"),
+                        ),
+                        label=f"elevenlabs tts {relative_path}",
+                        max_attempts=3,
+                        base_delay_seconds=1.5,
+                    )
+                    ext = ".mp3"
+
+                audio_name = f"{week_index:02d}_{week_stem}_summary{ext}"
+                audio_path = audio_dir / audio_name
+                audio_path.write_bytes(audio_bytes)
+                audio_rel = ensure_explicit_relative_path(encode_relative_path(f"../files/audio/{audio_name}"))
+                result["audio_created"] += 1
+                append_ai_job_manifest(output_dir, {
+                    "job_type": "week_audio",
+                    "job_id": audio_job_id,
+                    "status": "done",
+                    "provider": result["audio_provider"],
+                    "week_relative_path": relative_path,
+                    "input_markdown": summary_output_markdown or summary_input_markdown,
+                    "audio_relative_path": audio_rel,
+                })
+
+            week_path.write_text(
+                upsert_ai_summary_block(latest_markdown, summary_text, audio_relative_link=audio_rel),
+                encoding="utf-8",
+            )
+
+        first_pass_failures = {}
+        for task in audio_tasks:
+            relative_path = task["relative_path"]
+            audio_job_id = task["audio_job_id"]
+            try:
+                process_week_audio_task(task, allow_resume_manifest_skip=True)
             except Exception as exc:
+                first_pass_failures[relative_path] = str(exc)
                 append_ai_job_manifest(output_dir, {
                     "job_type": "week_audio",
                     "job_id": audio_job_id,
@@ -2544,7 +2556,50 @@ def enrich_week_pages_with_ai_summary_and_audio(
                     "week_relative_path": relative_path,
                     "error": str(exc),
                 })
-                result["errors"].append(f"{relative_path}: audio phase: {exc}")
+
+        second_pass_tasks = []
+        for task in audio_tasks:
+            relative_path = task["relative_path"]
+            week_path = task["week_path"]
+            if not week_path.exists():
+                continue
+            latest_markdown = week_path.read_text(encoding="utf-8")
+            latest_block = parse_existing_ai_summary_block(latest_markdown)
+            latest_audio_link = (latest_block.get("audio_link") or "").strip()
+            resolved = resolve_existing_audio_path(output_path, relative_path, latest_audio_link)
+            if resolved is None:
+                second_pass_tasks.append(task)
+
+        if second_pass_tasks:
+            print(f"[audio] Second pass: retrying {len(second_pass_tasks)} week(s) still missing audio")
+
+        unresolved_second_pass = {}
+        for task in second_pass_tasks:
+            relative_path = task["relative_path"]
+            audio_job_id = task["audio_job_id"]
+            try:
+                process_week_audio_task(task, allow_resume_manifest_skip=False)
+                first_pass_failures.pop(relative_path, None)
+            except Exception as exc:
+                unresolved_second_pass[relative_path] = str(exc)
+                append_ai_job_manifest(output_dir, {
+                    "job_type": "week_audio",
+                    "job_id": audio_job_id,
+                    "status": "error",
+                    "provider": result["audio_provider"],
+                    "week_relative_path": relative_path,
+                    "error": f"second pass failed: {exc}",
+                })
+
+        for relative_path, message in first_pass_failures.items():
+            if relative_path not in unresolved_second_pass:
+                continue
+            result["errors"].append(f"{relative_path}: audio phase failed after second pass: {message}")
+
+        for relative_path, message in unresolved_second_pass.items():
+            if relative_path in first_pass_failures:
+                continue
+            result["errors"].append(f"{relative_path}: audio second pass: {message}")
 
     if gemini_tts:
         final_interval = float(current_gemini_tts_interval_seconds())
