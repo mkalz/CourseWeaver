@@ -141,6 +141,8 @@ ADAPTIVE_RATE_STATE = {
     "gemini_summary_interval": None,
     "gemini_summary_max_interval": 0.0,
     "gemini_summary_429_count": 0,
+    "gemini_tts_daily_quota_exhausted": False,
+    "gemini_tts_daily_quota_retry_hint": "",
 }
 AI_JOB_STATUS_CACHE = {}
 
@@ -161,6 +163,44 @@ def reset_adaptive_rate_state():
     ADAPTIVE_RATE_STATE["gemini_summary_interval"] = None
     ADAPTIVE_RATE_STATE["gemini_summary_max_interval"] = 0.0
     ADAPTIVE_RATE_STATE["gemini_summary_429_count"] = 0
+    ADAPTIVE_RATE_STATE["gemini_tts_daily_quota_exhausted"] = False
+    ADAPTIVE_RATE_STATE["gemini_tts_daily_quota_retry_hint"] = ""
+
+
+class DailyQuotaExceededError(RuntimeError):
+    pass
+
+
+def get_http_error_body_text(exc):
+    if not isinstance(exc, HTTPError):
+        return ""
+    cached = getattr(exc, "_copilot_cached_body_text", None)
+    if cached is not None:
+        return cached
+    body_text = ""
+    try:
+        body_text = (exc.read() or b"").decode("utf-8", errors="replace").strip()
+    except Exception:
+        body_text = ""
+    setattr(exc, "_copilot_cached_body_text", body_text)
+    return body_text
+
+
+def is_gemini_daily_quota_exceeded_error(exc):
+    if not isinstance(exc, HTTPError) or int(exc.code) != 429:
+        return False
+    text = get_http_error_body_text(exc).lower()
+    if not text:
+        return False
+    if "generate_requests_per_model_per_day" in text:
+        return True
+    return "quota exceeded" in text and "per_day" in text
+
+
+def parse_retry_hint_from_text(text):
+    value = "" if text is None else str(text)
+    match = re.search(r"please retry in\s+([^\"\n]+)", value, flags=re.IGNORECASE)
+    return (match.group(1).strip() if match else "")
 
 
 def reset_ai_job_status_cache():
@@ -1994,13 +2034,15 @@ def request_gemini_tts(text, api_key, model="gemini-2.5-flash-preview-tts", voic
             with urlopen(request, timeout=120) as response:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
-            details = ""
-            try:
-                details = (exc.read() or b"").decode("utf-8", errors="replace").strip()
-            except Exception:
-                details = ""
+            details = get_http_error_body_text(exc)
             if details:
                 print(f"[tts] Gemini TTS HTTP {exc.code}: {details[:500]}")
+            if is_gemini_daily_quota_exceeded_error(exc):
+                retry_hint = parse_retry_hint_from_text(details)
+                ADAPTIVE_RATE_STATE["gemini_tts_daily_quota_exhausted"] = True
+                ADAPTIVE_RATE_STATE["gemini_tts_daily_quota_retry_hint"] = retry_hint
+                hint_text = f" Retry in {retry_hint}." if retry_hint else ""
+                raise DailyQuotaExceededError(f"Gemini daily TTS quota exhausted.{hint_text}")
             raise
 
         data = json.loads(raw)
@@ -2041,7 +2083,11 @@ def request_gemini_tts(text, api_key, model="gemini-2.5-flash-preview-tts", voic
 
 
 def is_retryable_api_error(exc):
+    if isinstance(exc, DailyQuotaExceededError):
+        return False
     if isinstance(exc, HTTPError):
+        if is_gemini_daily_quota_exceeded_error(exc):
+            return False
         return exc.code == 429 or 500 <= int(exc.code) <= 599
     if isinstance(exc, (URLError, TimeoutError)):
         return True
@@ -2424,6 +2470,8 @@ def enrich_week_pages_with_ai_summary_and_audio(
 
     # Phase 2: Create audio from prepared summaries.
     if effective_audio:
+        gemini_daily_quota_message = ""
+
         def process_week_audio_task(task, allow_resume_manifest_skip=True):
             week_index = task["week_index"]
             week_stem = task["week_stem"]
@@ -2442,6 +2490,12 @@ def enrich_week_pages_with_ai_summary_and_audio(
 
             current_audio_link = (latest_block.get("audio_link") or existing_audio_link or "").strip()
             audio_rel = None
+
+            if gemini_tts and ADAPTIVE_RATE_STATE.get("gemini_tts_daily_quota_exhausted"):
+                hint = str(ADAPTIVE_RATE_STATE.get("gemini_tts_daily_quota_retry_hint") or "").strip()
+                hint_text = f" Retry in {hint}." if hint else ""
+                raise DailyQuotaExceededError(f"Gemini daily TTS quota exhausted.{hint_text}")
+
             if audio_only_missing:
                 existing_audio_path = resolve_existing_audio_path(output_path, relative_path, current_audio_link)
                 if existing_audio_path is not None:
@@ -2546,6 +2600,17 @@ def enrich_week_pages_with_ai_summary_and_audio(
             audio_job_id = task["audio_job_id"]
             try:
                 process_week_audio_task(task, allow_resume_manifest_skip=True)
+            except DailyQuotaExceededError as exc:
+                gemini_daily_quota_message = str(exc)
+                append_ai_job_manifest(output_dir, {
+                    "job_type": "week_audio",
+                    "job_id": audio_job_id,
+                    "status": "skipped",
+                    "provider": result["audio_provider"],
+                    "week_relative_path": relative_path,
+                    "reason": gemini_daily_quota_message,
+                })
+                first_pass_failures[relative_path] = gemini_daily_quota_message
             except Exception as exc:
                 first_pass_failures[relative_path] = str(exc)
                 append_ai_job_manifest(output_dir, {
@@ -2570,6 +2635,25 @@ def enrich_week_pages_with_ai_summary_and_audio(
             if resolved is None:
                 second_pass_tasks.append(task)
 
+        if gemini_tts and ADAPTIVE_RATE_STATE.get("gemini_tts_daily_quota_exhausted") and second_pass_tasks:
+            if not gemini_daily_quota_message:
+                hint = str(ADAPTIVE_RATE_STATE.get("gemini_tts_daily_quota_retry_hint") or "").strip()
+                hint_text = f" Retry in {hint}." if hint else ""
+                gemini_daily_quota_message = f"Gemini daily TTS quota exhausted.{hint_text}"
+            for task in second_pass_tasks:
+                relative_path = task["relative_path"]
+                audio_job_id = task["audio_job_id"]
+                append_ai_job_manifest(output_dir, {
+                    "job_type": "week_audio",
+                    "job_id": audio_job_id,
+                    "status": "skipped",
+                    "provider": result["audio_provider"],
+                    "week_relative_path": relative_path,
+                    "reason": gemini_daily_quota_message,
+                })
+                first_pass_failures[relative_path] = gemini_daily_quota_message
+            second_pass_tasks = []
+
         if second_pass_tasks:
             print(f"[audio] Second pass: retrying {len(second_pass_tasks)} week(s) still missing audio")
 
@@ -2580,6 +2664,17 @@ def enrich_week_pages_with_ai_summary_and_audio(
             try:
                 process_week_audio_task(task, allow_resume_manifest_skip=False)
                 first_pass_failures.pop(relative_path, None)
+            except DailyQuotaExceededError as exc:
+                gemini_daily_quota_message = str(exc)
+                unresolved_second_pass[relative_path] = gemini_daily_quota_message
+                append_ai_job_manifest(output_dir, {
+                    "job_type": "week_audio",
+                    "job_id": audio_job_id,
+                    "status": "skipped",
+                    "provider": result["audio_provider"],
+                    "week_relative_path": relative_path,
+                    "reason": gemini_daily_quota_message,
+                })
             except Exception as exc:
                 unresolved_second_pass[relative_path] = str(exc)
                 append_ai_job_manifest(output_dir, {
@@ -2593,6 +2688,8 @@ def enrich_week_pages_with_ai_summary_and_audio(
 
         for relative_path, message in first_pass_failures.items():
             if relative_path not in unresolved_second_pass:
+                if gemini_daily_quota_message and message == gemini_daily_quota_message:
+                    result["audio_skipped_manifest"] += 1
                 continue
             result["errors"].append(f"{relative_path}: audio phase failed after second pass: {message}")
 
