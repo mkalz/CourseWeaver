@@ -1,0 +1,34 @@
+# ── CourseWeaver – FastAPI application dependencies ──────────────────────────
+# Install with: pip install -r requirements-app.txt
+# For GPU (CUDA), also install: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+python-multipart>=0.0.9
+
+# ── Async HTTP client (summariser service) ────────────────────────────────────
+httpx>=0.27.0
+
+# ── Async SQLite ──────────────────────────────────────────────────────────────
+aiosqlite>=0.20.0
+
+# ── TTS engines (install what you need) ──────────────────────────────────────
+# XTTS v2 (Coqui):
+TTS>=0.22.0
+# Kokoro ONNX:
+kokoro-onnx>=0.4.0
+soundfile>=0.12.1
+
+# ── Audio / numerics ─────────────────────────────────────────────────────────
+numpy>=1.26.0
+# torch is required for GPU TTS; optional for CPU-only use:
+# torch>=2.3.0
+
+# ── Existing moodle2md engine dependencies ───────────────────────────────────
+lxml>=5.0
+PyMuPDF>=1.24
+pytesseract>=0.3.10
+Pillow>=10.0
